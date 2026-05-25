@@ -17,16 +17,15 @@ unsigned int DarkGravityWave3Nova(const CBlockIndex* pindexLast, const Consensus
 unsigned int Lwma3(const CBlockIndex* pindexLast, const Consensus::Params& params);
 
 // Dual-PoW helpers ------------------------------------------------------------
-//
-// The chain is already live on Yespower. We do NOT touch history. At
-// `sha256ReactivationHeight` (a height in the future) SHA256 becomes the
-// primary PoW and is ALWAYS accepted from that height onward. Yespower is
-// kept as an additive emergency fallback that is only armed when the
-// encoded target is easier than the SHA256 powLimit (difficulty < 1).
+// At `sha256ReactivationHeight` SHA256 becomes the primary PoW and is
+// ALWAYS accepted from that height onward. Yespower is retained as an
+// additive emergency fallback that arms when the time gap between the
+// candidate block and its parent exceeds `nPowEmergencyTimeout` seconds.
 //
 //   Pre-reactivation : Yespower is the main PoW (historical chain).
-//   Post-reactivation: SHA256 is always valid; Yespower is ALSO valid only
-//                      when the block's target is in emergency range.
+//   Post-reactivation: SHA256 is always valid; Yespower is ALSO valid for
+//                      a given block only when the time-based emergency
+//                      trigger is armed for that block.
 static inline bool IsPostSha256Fork(int nHeight, const Consensus::Params& params)
 {
     return nHeight >= params.sha256ReactivationHeight;
