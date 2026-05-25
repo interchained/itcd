@@ -1164,15 +1164,20 @@ static bool WriteBlockToDisk(const CBlock& block, FlatFilePos& pos, const CMessa
     catch (const std::exception& e) {
         return error("%s: Deserialize or I/O error - %s at %s", __func__, e.what(), pos.ToString());
     }
+    // Dual-PoW hash selection (see CheckBlockHeader for the rationale).
     uint256 hash;
     if (nHeight == 0) {
         hash = block.GetHash(); // force legacy SHA256
+    } else if (nHeight >= consensusParams.sha256ReactivationHeight) {
+        hash = block.GetHash(); // SHA256 (dual-PoW path)
     } else if (nHeight >= 1) {
         hash = YespowerHash(block, nHeight);
     } else {
         hash = block.GetHash(); // Legacy SHA256
     }
-    // Check the header
+    // Check the header. prevBlockTime defaults to -1 (permissive) since
+    // this path doesn't have pindexPrev handy; blocks reaching disk reload
+    // were already validated at acceptance time.
     if (!CheckProofOfWork(hash, block, block.nBits, consensusParams, nHeight))
         return error("ReadBlockFromDisk: Errors in block header at %s", pos.ToString());
 
@@ -2001,7 +2006,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // is enforced in ContextualCheckBlockHeader(); we wouldn't want to
     // re-enforce that rule here (at least until we make it impossible for
     // GetAdjustedTime() to go backward).
-    if (!CheckBlock(block, state, chainparams.GetConsensus(), pindex->nHeight, !fJustCheck, !fJustCheck)) {
+    if (!CheckBlock(block, state, chainparams.GetConsensus(), pindex->nHeight, !fJustCheck, !fJustCheck, pindex->pprev ? pindex->pprev->GetBlockTime() : -1)) {
         if (state.GetResult() == BlockValidationResult::BLOCK_MUTATED) {
             // We don't write down blocks to disk if they may have been
             // corrupted, so this should be impossible unless we're having hardware
@@ -3425,11 +3430,19 @@ static bool FindUndoPos(BlockValidationState &state, int nFile, FlatFilePos &pos
     return true;
 }
 
-static bool CheckBlockHeader(const CBlockHeader& block, BlockValidationState& state, const Consensus::Params& consensusParams, int nHeight, bool fCheckPOW = true)
+static bool CheckBlockHeader(const CBlockHeader& block, BlockValidationState& state, const Consensus::Params& consensusParams, int nHeight, bool fCheckPOW = true, int64_t prevBlockTime = -1)
 {
+    // Dual-PoW hash selection:
+    //   Post-reactivation : SHA256 (the Yespower fallback inside
+    //                       CheckProofOfWork re-hashes internally, so we
+    //                       don't need to precompute YespowerHash here).
+    //   Pre-reactivation  : Yespower (legacy live-chain path).
+    //   Genesis           : SHA256.
     uint256 hash;
     if (nHeight == 0) {
         hash = block.GetHash(); // force legacy SHA256
+    } else if (nHeight >= consensusParams.sha256ReactivationHeight) {
+        hash = block.GetHash(); // SHA256 (dual-PoW path)
     } else if (nHeight >= 1) {
         hash = YespowerHash(block, nHeight);
     } else {
@@ -3437,13 +3450,13 @@ static bool CheckBlockHeader(const CBlockHeader& block, BlockValidationState& st
     }
 
     // Check proof of work matches claimed amount
-    if (fCheckPOW && !CheckProofOfWork(hash, block, block.nBits, consensusParams, nHeight))
+    if (fCheckPOW && !CheckProofOfWork(hash, block, block.nBits, consensusParams, nHeight, prevBlockTime))
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "high-hash", "proof of work failed");
 
     return true;
 }
 
-bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensus::Params& consensusParams, int nHeight, bool fCheckPOW, bool fCheckMerkleRoot)
+bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensus::Params& consensusParams, int nHeight, bool fCheckPOW, bool fCheckMerkleRoot, int64_t prevBlockTime)
 {
     // These are checks that are independent of context.
 
@@ -3452,7 +3465,7 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
 
     // Check that the header is valid (particularly PoW).  This is mostly
     // redundant with the call in AcceptBlockHeader.
-    if (!CheckBlockHeader(block, state, consensusParams, fCheckPOW, nHeight))
+    if (!CheckBlockHeader(block, state, consensusParams, fCheckPOW, nHeight, prevBlockTime))
         return false;
 
     // Signet only: check block solution
@@ -3744,6 +3757,32 @@ bool BlockManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationS
             if (ppindex)
                 *ppindex = pindex;
             if (pindex->nStatus & BLOCK_FAILED_MASK) {
+                // Self-healing for the dual-PoW upgrade: a block rejected by
+                // an earlier binary (e.g. pre-grace-window, pre-CheckBlockHeader-
+                // hash-selection fix) may now be valid under current consensus.
+                // Re-run CheckBlockHeader for post-reactivation heights and
+                // clear the cached failure if it now passes. Pre-reactivation
+                // history is left untouched — those failures are real.
+                const Consensus::Params& cp = chainparams.GetConsensus();
+                const bool eligible =
+                    (pindex->nStatus & BLOCK_FAILED_VALID) &&
+                    pindex->nHeight >= cp.sha256ReactivationHeight;
+                if (eligible) {
+                    BlockValidationState recheck;
+                    const int64_t prevTime = pindex->pprev ? pindex->pprev->GetBlockTime() : -1;
+                    if (CheckBlockHeader(block, recheck, cp, pindex->nHeight,
+                                         /*fCheckPOW=*/true, prevTime)) {
+                        LogPrintf("ℹ️  Clearing stale BLOCK_FAILED on %s (h=%d) — passes under current dual-PoW consensus\n",
+                                  hash.ToString(), pindex->nHeight);
+                        pindex->nStatus &= ~BLOCK_FAILED_MASK;
+                        setDirtyBlockIndex.insert(pindex);
+                        m_failed_blocks.erase(pindex);
+                        if (ppindex) *ppindex = pindex;
+                        return true;
+                    }
+                    LogPrintf("ℹ️  Stale BLOCK_FAILED on %s (h=%d) re-checked: still invalid (%s)\n",
+                              hash.ToString(), pindex->nHeight, recheck.ToString());
+                }
                 LogPrintf("ERROR: %s: block %s is marked invalid\n", __func__, hash.ToString());
                 return state.Invalid(BlockValidationResult::BLOCK_CACHED_INVALID, "duplicate");
             }
@@ -3766,7 +3805,7 @@ bool BlockManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationS
         // ✅ Now calculate height using pindexPrev
         int nHeight = pindexPrev->nHeight + 1;
 
-        if (!CheckBlockHeader(block, state, chainparams.GetConsensus(), nHeight)) {
+        if (!CheckBlockHeader(block, state, chainparams.GetConsensus(), nHeight, /*fCheckPOW=*/true, /*prevBlockTime=*/pindexPrev->GetBlockTime())) {
             LogPrint(BCLog::VALIDATION, "%s: Consensus::CheckBlockHeader: %s, %s\n", __func__, hash.ToString(), state.ToString());
             return false;
         }
@@ -3898,7 +3937,7 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock>& pblock, Block
         if (pindex->nChainWork < nMinimumChainWork) return true;
     }
     int nHeight = pindex->nHeight;
-    if (!CheckBlock(block, state, chainparams.GetConsensus(), nHeight, true, true) ||
+    if (!CheckBlock(block, state, chainparams.GetConsensus(), nHeight, true, true, pindex->pprev ? pindex->pprev->GetBlockTime() : -1) ||
         !ContextualCheckBlock(block, state, chainparams.GetConsensus(), pindex->pprev)) {
         if (state.IsInvalid() && state.GetResult() != BlockValidationResult::BLOCK_MUTATED) {
             pindex->nStatus |= BLOCK_FAILED_VALID;
@@ -3953,7 +3992,9 @@ bool ChainstateManager::ProcessNewBlock(const CChainParams& chainparams, const s
             CBlockIndex* pprev = LookupBlockIndex(pblock->hashPrevBlock);
             nHeight = pprev ? pprev->nHeight + 1 : 0;
         }
-        bool ret = CheckBlock(*pblock, state, chainparams.GetConsensus(), nHeight, true, true);
+        CBlockIndex* pprevForTime = LookupBlockIndex(pblock->hashPrevBlock);
+        int64_t prevBlockTime = pprevForTime ? pprevForTime->GetBlockTime() : -1;
+        bool ret = CheckBlock(*pblock, state, chainparams.GetConsensus(), nHeight, true, true, prevBlockTime);
         if (ret) {
             // Store to disk
             ret = ::ChainstateActive().AcceptBlock(pblock, state, chainparams, &pindex, fForceProcessing, nullptr, fNewBlock);
@@ -3987,7 +4028,7 @@ bool TestBlockValidity(BlockValidationState& state, const CChainParams& chainpar
     // NOTE: CheckBlockHeader is called by CheckBlock
     if (!ContextualCheckBlockHeader(block, state, chainparams, pindexPrev, GetAdjustedTime()))
         return error("%s: Consensus::ContextualCheckBlockHeader: %s", __func__, state.ToString());
-    if (!CheckBlock(block, state, chainparams.GetConsensus(), indexDummy.nHeight, fCheckPOW, fCheckMerkleRoot))
+    if (!CheckBlock(block, state, chainparams.GetConsensus(), indexDummy.nHeight, fCheckPOW, fCheckMerkleRoot, pindexPrev ? pindexPrev->GetBlockTime() : -1))
         return error("%s: Consensus::CheckBlock: %s", __func__, state.ToString());
     if (!ContextualCheckBlock(block, state, chainparams.GetConsensus(), pindexPrev))
         return error("%s: Consensus::ContextualCheckBlock: %s", __func__, state.ToString());
@@ -4401,7 +4442,7 @@ bool CVerifyDB::VerifyDB(const CChainParams& chainparams, CCoinsView *coinsview,
         if (!ReadBlockFromDisk(block, pindex, chainparams.GetConsensus()))
             return error("VerifyDB(): *** ReadBlockFromDisk failed at %d, hash=%s", pindex->nHeight, pindex->GetBlockHash().ToString());
         // check level 1: verify block validity
-        if (nCheckLevel >= 1 && !CheckBlock(block, state, chainparams.GetConsensus(), pindex->nHeight, true, true))
+        if (nCheckLevel >= 1 && !CheckBlock(block, state, chainparams.GetConsensus(), pindex->nHeight, true, true, pindex->pprev ? pindex->pprev->GetBlockTime() : -1))
             return error("%s: *** found bad block at %d, hash=%s (%s)\n", __func__,
                          pindex->nHeight, pindex->GetBlockHash().ToString(), state.ToString());
         // check level 2: verify undo validity

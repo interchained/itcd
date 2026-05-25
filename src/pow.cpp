@@ -15,18 +15,75 @@
 unsigned int DarkGravityWave3(const CBlockIndex* pindexLast, const Consensus::Params& params);
 unsigned int DarkGravityWave3Nova(const CBlockIndex* pindexLast, const Consensus::Params& params);
 unsigned int Lwma3(const CBlockIndex* pindexLast, const Consensus::Params& params);
+
+// Dual-PoW helpers ------------------------------------------------------------
+// At `sha256ReactivationHeight` SHA256 becomes the primary PoW and is
+// ALWAYS accepted from that height onward. Yespower is retained as an
+// additive emergency fallback that arms when the time gap between the
+// candidate block and its parent exceeds `nPowEmergencyTimeout` seconds.
+//
+//   Pre-reactivation : Yespower is the main PoW (historical chain).
+//   Post-reactivation: SHA256 is always valid; Yespower is ALSO valid for
+//                      a given block only when the time-based emergency
+//                      trigger is armed for that block.
+static inline bool IsPostSha256Fork(int nHeight, const Consensus::Params& params)
+{
+    return nHeight >= params.sha256ReactivationHeight;
+}
+
+// The powLimit that applies for difficulty retargeting at a given next-height.
+// Post-reactivation we target SHA256 difficulty; pre-reactivation we stay
+// on Yespower.
+static inline uint256 GetPowLimitForHeight(int nHeight, const Consensus::Params& params)
+{
+    if (IsPostSha256Fork(nHeight, params)) return params.powLimit;
+    if (nHeight >= params.yespowerForkHeight) return params.powLimitYespower;
+    return params.powLimit;
+}
+
+// Emergency / stall trigger (TIME-BASED).
+//
+// Once SHA256 is live ASICs will pin difficulty, so a target-based trigger
+// can never fire. Instead we look at how long the candidate block claims it
+// has been since the previous block. If that gap exceeds
+// params.nPowEmergencyTimeout seconds, the Yespower fallback is armed for
+// this block (Yespower is accepted IN ADDITION to SHA256, never instead of).
+//
+// prevBlockTime < 0 means "unknown" (reload / reindex / unit tests). In that
+// case we arm the fallback permissively so already-validated blocks can be
+// reloaded from disk without difficulty.
+static inline bool IsEmergencyArmed(int64_t blockTime, int64_t prevBlockTime, const Consensus::Params& params)
+{
+    if (params.nPowEmergencyTimeout <= 0) return false;     // disabled
+    if (prevBlockTime < 0)                return true;      // unknown -> permissive
+    return (blockTime - prevBlockTime) > params.nPowEmergencyTimeout;
+}
+
+// Transition grace window: during the first nPowYespowerGraceBlocks blocks
+// at and after sha256ReactivationHeight, Yespower is accepted unconditionally
+// (no inter-block-time arming required). SHA256 is also accepted throughout.
+// After the window closes, Yespower reverts to emergency-only.
+static inline bool IsYespowerGraceActive(int nHeight, const Consensus::Params& params)
+{
+    if (params.nPowYespowerGraceBlocks <= 0) return false;
+    if (nHeight < params.sha256ReactivationHeight) return false;
+    return nHeight < (params.sha256ReactivationHeight + params.nPowYespowerGraceBlocks);
+}
+// ----------------------------------------------------------------------------
 // BITCOIN LEGACY DAA
 unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params& params)
 {
     assert(pindexLast != nullptr);
+    const int nextHeight = pindexLast->nHeight + 1;
     LogPrintf("GetNextWorkRequired: height=%d using %s\n", pindexLast->nHeight,
-          (pindexLast->nHeight >= params.yespowerForkHeight ? "Yespower target" : "SHA256 target"));
-          
-    if (pindexLast->nHeight + 1 >= params.nextDifficultyFork2Height) {
+          IsPostSha256Fork(nextHeight, params) ? "SHA256 target (post-fork)"
+                                               : (nextHeight >= params.yespowerForkHeight ? "Yespower target" : "SHA256 target"));
+
+    if (nextHeight >= params.nextDifficultyFork2Height) {
         return DarkGravityWave3Nova(pindexLast, params);
     }
-    
-    arith_uint256 limit = UintToArith256((pindexLast->nHeight + 1 >= params.yespowerForkHeight) ? params.powLimitYespower : params.powLimit);
+
+    arith_uint256 limit = UintToArith256(GetPowLimitForHeight(nextHeight, params));
     LogPrintf("💡 GetNextWorkRequired: powLimit used = %s\n", limit.ToString());
     unsigned int nProofOfWorkLimit = limit.GetCompact();
 
@@ -68,10 +125,9 @@ unsigned int DarkGravityWave3Nova(const CBlockIndex* pindexLast, const Consensus
     int nextHeight = pindexLast->nHeight + 1;
     const int nPastBlocks = (nextHeight >= params.nextDifficultyFork5Height) ? 12 : 24;
 
-    arith_uint256 limit = UintToArith256(
-        (nextHeight >= params.yespowerForkHeight) ? params.powLimitYespower : params.powLimit
-    );
-    LogPrintf("💡 DGW3-NOVA: powLimit used = %s\n", limit.ToString());
+    arith_uint256 limit = UintToArith256(GetPowLimitForHeight(nextHeight, params));
+    LogPrintf("💡 DGW3-NOVA: powLimit used = %s (%s)\n", limit.ToString(),
+              IsPostSha256Fork(nextHeight, params) ? "SHA256-post-fork" : "Yespower-era");
 
     if (nextHeight < nPastBlocks)
         return limit.GetCompact();
@@ -189,12 +245,20 @@ unsigned int DarkGravityWave3Nova(const CBlockIndex* pindexLast, const Consensus
         LogPrintf("🪂 DGW3-NOVA decay-from-baseline: newDifficulty=%.8f\n", newDifficulty.getdouble());
     }
 
-    arith_uint256 bnPowLimit = UintToArith256(
-        (nextHeight >= 1) ? params.powLimitYespower : params.powLimit
-    );
+    arith_uint256 bnPowLimit = UintToArith256(GetPowLimitForHeight(nextHeight, params));
 
     if (nextHeight <= 1 && newDifficulty > bnPowLimit) {
         newDifficulty = bnPowLimit;
+    }
+
+    // Post-reactivation: cap the retarget result at the Yespower powLimit.
+    // SHA256 miners always have diff >= 1 work (the check path clamps the
+    // effective SHA256 target at the SHA256 powLimit); the wider Yespower
+    // limit here just keeps the encoded nBits within a representable band
+    // for any future fallback solution.
+    if (IsPostSha256Fork(nextHeight, params)) {
+        arith_uint256 yespowerCap = UintToArith256(params.powLimitYespower);
+        if (newDifficulty > yespowerCap) newDifficulty = yespowerCap;
     }
 
     LogPrintf("⛏️ Retargeting at height=%d with DGW3-NOVA\n", pindexLast->nHeight);
@@ -208,16 +272,12 @@ unsigned int DarkGravityWave3(const CBlockIndex* pindexLast, const Consensus::Pa
     int nextHeight = (pindexLast ? pindexLast->nHeight + 1 : 0);
     
     LogPrintf("💡 DGW3: nHeight=%d returning powLimit %s\n", nextHeight,
-        (nextHeight >= params.yespowerForkHeight) ?
-        "Yespower" : "SHA256");
-    arith_uint256 limit = UintToArith256((nextHeight >= params.yespowerForkHeight) ? params.powLimitYespower : params.powLimit);
+        IsPostSha256Fork(nextHeight, params) ? "SHA256 (post-fork)"
+        : (nextHeight >= params.yespowerForkHeight ? "Yespower" : "SHA256"));
+    arith_uint256 limit = UintToArith256(GetPowLimitForHeight(nextHeight, params));
     LogPrintf("💡 DGW3: powLimit used = %s\n", limit.ToString());
     if (nextHeight < nPastBlocks)
-        return UintToArith256(
-            (pindexLast->nHeight + 1 >= params.yespowerForkHeight)
-            ? params.powLimitYespower
-            : params.powLimit
-        ).GetCompact();
+        return limit.GetCompact();
 
     const CBlockIndex* pindex = pindexLast;
     arith_uint256 pastDifficultyAverage;
@@ -255,16 +315,19 @@ unsigned int DarkGravityWave3(const CBlockIndex* pindexLast, const Consensus::Pa
 
     arith_uint256 newDifficulty = pastDifficultyAverage * actualTimespan / targetTimespan;
 
-    arith_uint256 bnPowLimit = UintToArith256(
-        (pindexLast->nHeight + 1 >= params.yespowerForkHeight)
-        ? params.powLimitYespower
-        : params.powLimit
-    );
+    arith_uint256 bnPowLimit = UintToArith256(GetPowLimitForHeight(nextHeight, params));
 
-    if (pindexLast->nHeight + 1 <= 5879 && newDifficulty > bnPowLimit) { 
+    if (pindexLast->nHeight + 1 <= 5879 && newDifficulty > bnPowLimit) {
         newDifficulty = bnPowLimit;
     }
-    
+
+    // Post-reactivation: cap the retarget at the Yespower powLimit
+    // (see matching comment in DarkGravityWave3Nova).
+    if (IsPostSha256Fork(nextHeight, params)) {
+        arith_uint256 yespowerCap = UintToArith256(params.powLimitYespower);
+        if (newDifficulty > yespowerCap) newDifficulty = yespowerCap;
+    }
+
     LogPrintf("⛏️ Retargeting at height=%d with DGW3\n", pindexLast->nHeight);
 
     return newDifficulty.GetCompact();
@@ -281,19 +344,16 @@ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nF
     if (nActualTimespan > params.nPowTargetTimespan * 4)
         nActualTimespan = params.nPowTargetTimespan * 4;
 
-    arith_uint256 bnPowLimit = UintToArith256(
-        (pindexLast->nHeight + 1 >= params.yespowerForkHeight)
-        ? params.powLimitYespower
-        : params.powLimit
-    );
+    const int nextHeight = pindexLast->nHeight + 1;
+    arith_uint256 bnPowLimit = UintToArith256(GetPowLimitForHeight(nextHeight, params));
 
     arith_uint256 bnNew;
     bnNew.SetCompact(pindexLast->nBits);
     bnNew *= nActualTimespan;
     bnNew /= params.nPowTargetTimespan;
 
-    if (bnNew > UintToArith256(params.powLimit))
-        bnNew = UintToArith256(params.powLimit);
+    if (bnNew > bnPowLimit)
+        bnNew = bnPowLimit;
     
     LogPrintf("CalculateNextWorkRequired: nBits=%08x, target=%s\n",
               bnNew.GetCompact(), bnNew.ToString());
@@ -309,9 +369,8 @@ unsigned int Lwma3(const CBlockIndex* pindexLast, const Consensus::Params& param
     const int64_t T = params.nPowTargetSpacing;
     const int64_t k = N * (N + 1) / 2;
 
-    uint256 powLimit = (pindexLast->nHeight + 1 >= params.yespowerForkHeight)
-                           ? params.powLimitYespower
-                           : params.powLimit;
+    const int nextHeight = pindexLast->nHeight + 1;
+    uint256 powLimit = GetPowLimitForHeight(nextHeight, params);
 
     arith_uint256 bnPowLimit = UintToArith256(powLimit);
 
@@ -349,13 +408,13 @@ unsigned int Lwma3(const CBlockIndex* pindexLast, const Consensus::Params& param
     return nextTarget.GetCompact();
 }
 
-bool CheckProofOfWorkWithHeight(uint256 hash, CBlockHeader block, unsigned int nBits, const Consensus::Params& params, int nHeight)
+bool CheckProofOfWorkWithHeight(uint256 hash, CBlockHeader block, unsigned int nBits, const Consensus::Params& params, int nHeight, int64_t prevBlockTime)
 {
     bool fNegative;
     bool fOverflow;
     arith_uint256 bnTarget;
 
-    LogPrintf("💡 CheckProofOfWorkWithHeight: nHeight=%d\n", nHeight);
+    LogPrintf("💡 CheckProofOfWorkWithHeight: nHeight=%d prevBlockTime=%d\n", nHeight, (int)prevBlockTime);
     bnTarget.SetCompact(nBits, &fNegative, &fOverflow);
 
     if (nHeight == 0 || hash == params.hashGenesisBlock) {
@@ -368,10 +427,69 @@ bool CheckProofOfWorkWithHeight(uint256 hash, CBlockHeader block, unsigned int n
         return false;
     }
 
+    // -----------------------------------------------------------------------
+    // POST-REACTIVATION (height >= sha256ReactivationHeight): dual PoW.
+    //
+    //   SHA256 is always accepted. The effective SHA256 target is the
+    //   block's encoded target clamped at the SHA256 powLimit so SHA256
+    //   miners always have diff >= 1 work regardless of nBits.
+    //
+    //   Yespower is additionally accepted when the time-based emergency
+    //   trigger is armed for this block:
+    //       (block.nTime - prevBlock.nTime) > nPowEmergencyTimeout.
+    //   The Yespower target is the block's encoded target and must fit
+    //   inside the Yespower powLimit.
+    // -----------------------------------------------------------------------
+    if (IsPostSha256Fork(nHeight, params)) {
+        const arith_uint256 sha256Limit   = UintToArith256(params.powLimit);
+        const arith_uint256 yespowerLimit = UintToArith256(params.powLimitYespower);
+
+        if (bnTarget > yespowerLimit) {
+            LogPrintf("❌ Post-reactivation block rejected: target above yespower powLimit\n");
+            return false;
+        }
+
+        const bool grace     = IsYespowerGraceActive(nHeight, params);
+        const bool emergency = IsEmergencyArmed((int64_t)block.nTime, prevBlockTime, params);
+        const bool yespowerAllowed = grace || emergency;
+        LogPrintf("🔁 Dual-PoW @%d: SHA256 always-on%s%s (gap=%lds, threshold=%lds, graceEnds=%d)\n",
+                  nHeight,
+                  grace     ? " + Yespower (grace window)" : "",
+                  (!grace && emergency) ? " + Yespower (emergency)" : "",
+                  (long)(prevBlockTime < 0 ? -1 : (int64_t)block.nTime - prevBlockTime),
+                  (long)params.nPowEmergencyTimeout,
+                  params.sha256ReactivationHeight + params.nPowYespowerGraceBlocks);
+
+        // ---- SHA256 path: always available post-fork ----
+        // Cap the effective target at the SHA256 powLimit so SHA256 miners
+        // always have diff >= 1 work, and so emergency-range nBits don't
+        // lock SHA256 out.
+        {
+            arith_uint256 sha256Target = bnTarget;
+            if (sha256Target > sha256Limit) sha256Target = sha256Limit;
+            if (UintToArith256(hash) <= sha256Target) {
+                LogPrintf("📏 SHA256 hash <= target ✅\n");
+                return true;
+            }
+        }
+
+        // ---- Yespower path: open during grace window, or armed via emergency timeout ----
+        if (yespowerAllowed) {
+            LogPrintf("🛟 Trying Yespower (%s)\n", grace ? "grace window" : "emergency fallback");
+            return CheckYespower(block, bnTarget, nHeight);
+        }
+
+        LogPrintf("📏 SHA256 hash <= target ❌ (Yespower not allowed: no grace, no emergency)\n");
+        return false;
+    }
+
+    // -----------------------------------------------------------------------
+    // PRE-REACTIVATION: original Yespower path (historical chain).
+    // -----------------------------------------------------------------------
     if (nHeight >= 1) {
         LogPrintf("⚡ Using Yespower at height %d\n", nHeight);
-        if(nHeight == 1) {
-            return true; 
+        if (nHeight == 1) {
+            return true;
         }
         LogPrintf("🧮 Computed hash: %s\n", hash.ToString());
         LogPrintf("🎯 Target:        %s\n", bnTarget.ToString());
@@ -384,24 +502,33 @@ bool CheckProofOfWorkWithHeight(uint256 hash, CBlockHeader block, unsigned int n
     }
 }
 
-bool CheckProofOfWork(uint256 hash, const CBlockHeader& blockHeader, unsigned int nBits, const Consensus::Params& params, int nHeight)
+bool CheckProofOfWork(uint256 hash, const CBlockHeader& blockHeader, unsigned int nBits, const Consensus::Params& params, int nHeight, int64_t prevBlockTime)
 {
-    LogPrintf("🚧 CheckPoW height=%d, using: %s\n", nHeight,
-        (nHeight >= params.yespowerForkHeight) ? "Yespower" : "SHA256");
+    const char* algoTag = IsPostSha256Fork(nHeight, params)
+                              ? "SHA256 (post-reactivation, Yespower fallback when stalled)"
+                              : ((nHeight >= params.yespowerForkHeight) ? "Yespower" : "SHA256");
+    LogPrintf("🚧 CheckPoW height=%d, using: %s\n", nHeight, algoTag);
+
     if (nHeight == 0) {
         LogPrintf("🧱 Skipping PoW check for genesis block\n");
         return true;
     }
-    if(nHeight >= params.yespowerForkHeight) {
-        return CheckProofOfWorkWithHeight(hash, blockHeader, nBits, params, nHeight);
-    } else {
-        bool fNegative;
-        bool fOverflow;
-        arith_uint256 bnTarget;
-        bnTarget.SetCompact(nBits, &fNegative, &fOverflow);
-        // Check range
-        if (fNegative || bnTarget == 0 || fOverflow || bnTarget > UintToArith256(params.powLimit))
-            return false;
-        return UintToArith256(hash) <= bnTarget;
+
+    // Post-reactivation always goes through the dual-PoW path.
+    if (IsPostSha256Fork(nHeight, params)) {
+        return CheckProofOfWorkWithHeight(hash, blockHeader, nBits, params, nHeight, prevBlockTime);
     }
+
+    if (nHeight >= params.yespowerForkHeight) {
+        return CheckProofOfWorkWithHeight(hash, blockHeader, nBits, params, nHeight, prevBlockTime);
+    }
+
+    bool fNegative;
+    bool fOverflow;
+    arith_uint256 bnTarget;
+    bnTarget.SetCompact(nBits, &fNegative, &fOverflow);
+    // Check range
+    if (fNegative || bnTarget == 0 || fOverflow || bnTarget > UintToArith256(params.powLimit))
+        return false;
+    return UintToArith256(hash) <= bnTarget;
 }

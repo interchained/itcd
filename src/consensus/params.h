@@ -57,6 +57,47 @@ struct Params {
     uint256 powLimitYespower;
     int yespowerForkHeight;
     int sha256ForkHeight;
+    /**
+     * Height at which SHA256 becomes the primary PoW for this network.
+     * Distinct from `sha256ForkHeight`, which is a separate, pre-existing
+     * field left untouched.
+     *
+     * Pre-sha256ReactivationHeight: Yespower is the primary PoW.
+     * At/after sha256ReactivationHeight: SHA256 is always accepted.
+     *   Yespower is additionally accepted on a per-block basis when the
+     *   time-based emergency trigger (see `nPowEmergencyTimeout`) is armed.
+     *
+     * Defaults to `std::numeric_limits<int>::max()` so any network that
+     * does not explicitly set this field never activates the fork.
+     */
+    int sha256ReactivationHeight{std::numeric_limits<int>::max()};
+    /**
+     * Post-reactivation emergency-fallback threshold, in seconds.
+     *
+     * For a candidate block at height >= sha256ReactivationHeight, the
+     * Yespower fallback is armed when
+     *     (block.nTime - prevBlock.nTime) > nPowEmergencyTimeout.
+     * When armed, a Yespower solution is accepted in addition to SHA256.
+     * SHA256 is always accepted regardless of arming.
+     *
+     * 0 disables the fallback entirely (SHA256-only post-reactivation).
+     */
+    int64_t nPowEmergencyTimeout{0};
+    /**
+     * Transition grace window, in blocks.
+     *
+     * For the first `nPowYespowerGraceBlocks` blocks at and after
+     * `sha256ReactivationHeight`, Yespower is accepted UNCONDITIONALLY
+     * (no `nPowEmergencyTimeout` arming requirement). This lets miners
+     * coordinate the algorithm handoff without the chain cliff-stalling
+     * at the exact activation height. SHA256 is also accepted throughout
+     * the grace window. After the window closes, Yespower reverts to
+     * emergency-only via `nPowEmergencyTimeout`.
+     *
+     * 0 disables the grace window (strict emergency-only from height
+     * `sha256ReactivationHeight` onward).
+     */
+    int nPowYespowerGraceBlocks{0};
     int difficultyForkHeight;
     int nextDifficultyForkHeight;
     int nextDifficultyFork2Height;

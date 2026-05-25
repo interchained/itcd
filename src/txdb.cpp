@@ -279,13 +279,30 @@ bool CBlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, 
                 dummyHeader.nVersion = pindexNew->nVersion;
                 dummyHeader.nNonce = pindexNew->nNonce;
                                 
+                // Pick the hash the PoW check expects for this height:
+                //   - Pre-reactivation Yespower blocks  → Yespower hash
+                //   - Post-reactivation blocks          → SHA256 hash
+                //     (CheckProofOfWork's dual-PoW path checks SHA256 first
+                //     and re-hashes internally for the Yespower fallback)
+                //   - Genesis                            → SHA256 hash
                 uint256 powHash;
-                if (pindexNew->nHeight >= 1) {
+                if (pindexNew->nHeight >= consensusParams.sha256ReactivationHeight) {
+                    powHash = pindexNew->GetBlockHash();
+                } else if (pindexNew->nHeight >= 1) {
                     powHash = dummyHeader.YespowerHash(pindexNew->nHeight);
                 } else {
                     powHash = pindexNew->GetBlockHash();
                 }
-                if (!CheckProofOfWork(powHash, dummyHeader, pindexNew->nBits, consensusParams, pindexNew->nHeight)) {
+                // During index load, pprev may be a freshly-inserted stub whose
+                // nTime hasn't been populated from disk yet (LevelDB iterates
+                // in hash order, not height order). Treat an unloaded stub
+                // (nTime == 0) the same as a missing prev: pass -1 sentinel
+                // for permissive emergency-arming, matching every other call
+                // site that lacks a real previous-block timestamp.
+                int64_t prevBlockTime = (pindexNew->pprev && pindexNew->pprev->nTime != 0)
+                                          ? pindexNew->pprev->nTime
+                                          : -1;
+                if (!CheckProofOfWork(powHash, dummyHeader, pindexNew->nBits, consensusParams, pindexNew->nHeight, prevBlockTime)) {
                     return error("%s: CheckProofOfWork failed: %s", __func__, pindexNew->ToString());
                 }
                 pcursor->Next();

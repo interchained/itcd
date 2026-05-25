@@ -18,7 +18,17 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
 unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nFirstBlockTime, const Consensus::Params&);
 
 /** Check whether a block hash satisfies the proof-of-work requirement specified by nBits */
-bool CheckProofOfWork(uint256 hash, const CBlockHeader& blockHeader, unsigned int nBits, const Consensus::Params& params, int nHeight);
-bool CheckProofOfWorkWithHeight(uint256 hash, CBlockHeader block, unsigned int nBits, const Consensus::Params&, int nHeight);
+/**
+ * Check proof of work for a block.
+ *
+ * @param prevBlockTime  Timestamp (seconds) of the previous block. Used
+ *                       post-reactivation to decide whether the Yespower
+ *                       emergency fallback is armed for this block.
+ *                       Pass -1 when unknown (reload/reindex/test paths);
+ *                       in that case the fallback is permissively armed
+ *                       so already-validated blocks reload cleanly.
+ */
+bool CheckProofOfWork(uint256 hash, const CBlockHeader& blockHeader, unsigned int nBits, const Consensus::Params& params, int nHeight, int64_t prevBlockTime = -1);
+bool CheckProofOfWorkWithHeight(uint256 hash, CBlockHeader block, unsigned int nBits, const Consensus::Params&, int nHeight, int64_t prevBlockTime = -1);
 
 #endif // BITCOIN_POW_H
