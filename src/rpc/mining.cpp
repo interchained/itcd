@@ -129,7 +129,13 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock& block, uint64_t& 
     
     while (max_tries > 0 && block.nNonce < std::numeric_limits<uint32_t>::max() && !ShutdownRequested()) {
         uint256 powHash;
-        if (height >= 1) {
+        // Dual-PoW: at and after the SHA256 reactivation height, mine with SHA256.
+        // Pre-fork blocks remain Yespower. The validator (CheckProofOfWorkWithHeight)
+        // independently re-derives the correct algorithm; this branch just picks the
+        // hash we test the nonce against so we don't waste cycles on the wrong one.
+        if (height >= consensusParams.sha256ReactivationHeight) {
+            powHash = block.GetHash();
+        } else if (height >= 1) {
             powHash = YespowerHash(block, height);
         } else {
             powHash = block.GetHash();
@@ -152,7 +158,9 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock& block, uint64_t& 
         throw JSONRPCError(RPC_INTERNAL_ERROR, "ProcessNewBlock, block not accepted");
     }
 
-    if (height >= 1) {
+    if (height >= consensusParams.sha256ReactivationHeight) {
+        block_hash = block.GetHash();
+    } else if (height >= 1) {
         block_hash = YespowerHash(block, height);
     } else {
         block_hash = block.GetHash();
@@ -701,7 +709,10 @@ static RPCHelpMan getblocktemplate()
             int nHeight = ::ChainActive().Height() + 1;
             const auto& consensus = Params().GetConsensus();
 
-            if (nHeight >= 1) {
+            // Dual-PoW: SHA256 at and after the reactivation height.
+            if (nHeight >= consensus.sha256ReactivationHeight) {
+                hash = block.GetHash();
+            } else if (nHeight >= 1) {
                 hash = YespowerHash(block, nHeight);
             } else {
                 hash = block.GetHash();
@@ -1046,7 +1057,10 @@ protected:
         const Consensus::Params& consensus = Params().GetConsensus();
 
         uint256 block_expected_hash;
-        if (nHeight >= 1) {
+        // Dual-PoW: SHA256 at and after the reactivation height.
+        if (nHeight >= consensus.sha256ReactivationHeight) {
+            block_expected_hash = block.GetHash();
+        } else if (nHeight >= 1) {
             block_expected_hash = YespowerHash(block, nHeight);
         } else {
             block_expected_hash = block.GetHash();
@@ -1089,7 +1103,10 @@ static RPCHelpMan submitblock()
     int nHeight = ::ChainActive().Height() + 1;
     const Consensus::Params& consensus = Params().GetConsensus();
     uint256 hash;
-    if (nHeight >= 1) {
+    // Dual-PoW: SHA256 at and after the reactivation height.
+    if (nHeight >= consensus.sha256ReactivationHeight) {
+        hash = block.GetHash();
+    } else if (nHeight >= 1) {
         hash = YespowerHash(block, nHeight);
     } else {
         hash = block.GetHash();

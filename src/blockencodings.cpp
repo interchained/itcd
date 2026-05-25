@@ -181,8 +181,11 @@ ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<
     const Consensus::Params& params = Params().GetConsensus();
     uint256 hash;
 
-    if (realHeight >= params.yespowerForkHeight) {
-        hash = YespowerHash(header, realHeight); 
+    // Dual-PoW: SHA256 takes precedence at and after the reactivation height.
+    if (realHeight >= params.sha256ReactivationHeight) {
+        hash = header.GetHash();
+    } else if (realHeight >= params.yespowerForkHeight) {
+        hash = YespowerHash(header, realHeight);
     } else {
         hash = header.GetHash();
     }

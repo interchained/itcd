@@ -142,7 +142,16 @@ void GenerateBitcoins(bool fGenerate, CConnman* connman, int nThreads, const std
 
                         int nHeight = ::ChainActive().Height() + 1;
                         uint256 hash;
-                        if (nHeight >= 1) {
+                        const Consensus::Params& cp = Params().GetConsensus();
+                        if (nHeight >= cp.sha256ReactivationHeight) {
+                            // Dual-PoW: SHA256 is the primary algorithm at and after
+                            // the reactivation height. During the grace window either
+                            // algorithm is consensus-valid; post-grace, Yespower is
+                            // only accepted as an emergency fallback (prev-block gap
+                            // > nPowEmergencyTimeout), which a single miner cannot
+                            // reliably engineer — so always mine SHA256 here.
+                            hash = block.GetHash();
+                        } else if (nHeight >= 1) {
                             hash = YespowerHash(block, &shared, nHeight);
                         } else {
                             hash = block.GetHash();

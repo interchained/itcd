@@ -3764,8 +3764,13 @@ bool BlockManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationS
                 // clear the cached failure if it now passes. Pre-reactivation
                 // history is left untouched — those failures are real.
                 const Consensus::Params& cp = chainparams.GetConsensus();
+                // Eligible for self-heal: any post-reactivation block whose
+                // failure mark (VALID *or* CHILD) was set by a pre-patch binary.
+                // CHILD bits are cleared opportunistically too; if the ancestor
+                // is also stale-failed it will heal when its own header is
+                // re-announced.
                 const bool eligible =
-                    (pindex->nStatus & BLOCK_FAILED_VALID) &&
+                    (pindex->nStatus & (BLOCK_FAILED_VALID | BLOCK_FAILED_CHILD)) &&
                     pindex->nHeight >= cp.sha256ReactivationHeight;
                 if (eligible) {
                     BlockValidationState recheck;
@@ -4287,6 +4292,47 @@ bool BlockManager::LoadBlockIndex(
             pindex->BuildSkip();
         if (pindex->IsValid(BLOCK_VALID_TREE) && (pindexBestHeader == nullptr || CBlockIndexWorkComparator()(pindexBestHeader, pindex)))
             pindexBestHeader = pindex;
+    }
+
+    // -----------------------------------------------------------------------
+    // Dual-PoW startup sweep: clear stale BLOCK_FAILED_* bits on any post-
+    // reactivation block. Earlier binaries (pre-grace-window, pre-CheckBlockHeader-
+    // hash-selection fix) wrote BLOCK_FAILED_VALID for blocks that are valid
+    // under current consensus. We clear those marks at startup so the next
+    // header announcement from a peer triggers fresh validation instead of
+    // hitting the cached-invalid short-circuit in AcceptBlockHeader.
+    //
+    // Pre-reactivation history is left untouched — those failures are real.
+    // We do NOT call CheckProofOfWork here; we just drop the stale label and
+    // let the regular acceptance pipeline re-validate when the block is
+    // re-announced. If it still fails under current rules, it will simply be
+    // re-marked as failed.
+    {
+        size_t cleared = 0;
+        std::vector<CBlockIndex*> reinserts;
+        for (const std::pair<int, CBlockIndex*>& item : vSortedByHeight) {
+            CBlockIndex* pindex = item.second;
+            if (pindex->nHeight < consensus_params.sha256ReactivationHeight) continue;
+            if (!(pindex->nStatus & BLOCK_FAILED_MASK)) continue;
+            pindex->nStatus &= ~BLOCK_FAILED_MASK;
+            setDirtyBlockIndex.insert(pindex);
+            m_failed_blocks.erase(pindex);
+            // Re-eligible for chain selection on next round.
+            reinserts.push_back(pindex);
+            ++cleared;
+        }
+        for (CBlockIndex* pindex : reinserts) {
+            if (pindex->IsValid(BLOCK_VALID_TRANSACTIONS) && (pindex->HaveTxsDownloaded() || pindex->pprev == nullptr)) {
+                block_index_candidates.insert(pindex);
+            }
+            if (pindex->IsValid(BLOCK_VALID_TREE) && (pindexBestHeader == nullptr || CBlockIndexWorkComparator()(pindexBestHeader, pindex))) {
+                pindexBestHeader = pindex;
+            }
+        }
+        if (cleared > 0) {
+            LogPrintf("ℹ️  Dual-PoW startup sweep: cleared stale BLOCK_FAILED on %u post-reactivation block(s) (heights >= %d)\n",
+                      (unsigned)cleared, consensus_params.sha256ReactivationHeight);
+        }
     }
 
     return true;
