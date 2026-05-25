@@ -3757,6 +3757,32 @@ bool BlockManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationS
             if (ppindex)
                 *ppindex = pindex;
             if (pindex->nStatus & BLOCK_FAILED_MASK) {
+                // Self-healing for the dual-PoW upgrade: a block rejected by
+                // an earlier binary (e.g. pre-grace-window, pre-CheckBlockHeader-
+                // hash-selection fix) may now be valid under current consensus.
+                // Re-run CheckBlockHeader for post-reactivation heights and
+                // clear the cached failure if it now passes. Pre-reactivation
+                // history is left untouched — those failures are real.
+                const Consensus::Params& cp = chainparams.GetConsensus();
+                const bool eligible =
+                    (pindex->nStatus & BLOCK_FAILED_VALID) &&
+                    pindex->nHeight >= cp.sha256ReactivationHeight;
+                if (eligible) {
+                    BlockValidationState recheck;
+                    const int64_t prevTime = pindex->pprev ? pindex->pprev->GetBlockTime() : -1;
+                    if (CheckBlockHeader(block, recheck, cp, pindex->nHeight,
+                                         /*fCheckPOW=*/true, prevTime)) {
+                        LogPrintf("ℹ️  Clearing stale BLOCK_FAILED on %s (h=%d) — passes under current dual-PoW consensus\n",
+                                  hash.ToString(), pindex->nHeight);
+                        pindex->nStatus &= ~BLOCK_FAILED_MASK;
+                        setDirtyBlockIndex.insert(pindex);
+                        m_failed_blocks.erase(pindex);
+                        if (ppindex) *ppindex = pindex;
+                        return true;
+                    }
+                    LogPrintf("ℹ️  Stale BLOCK_FAILED on %s (h=%d) re-checked: still invalid (%s)\n",
+                              hash.ToString(), pindex->nHeight, recheck.ToString());
+                }
                 LogPrintf("ERROR: %s: block %s is marked invalid\n", __func__, hash.ToString());
                 return state.Invalid(BlockValidationResult::BLOCK_CACHED_INVALID, "duplicate");
             }
