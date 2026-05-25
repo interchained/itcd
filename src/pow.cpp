@@ -461,16 +461,26 @@ bool CheckProofOfWorkWithHeight(uint256 hash, CBlockHeader block, unsigned int n
                   params.sha256ReactivationHeight + params.nPowYespowerGraceBlocks);
 
         // ---- SHA256 path: always available post-fork ----
-        // Cap the effective target at the SHA256 powLimit so SHA256 miners
-        // always have diff >= 1 work, and so emergency-range nBits don't
-        // lock SHA256 out.
-        {
-            arith_uint256 sha256Target = bnTarget;
-            if (sha256Target > sha256Limit) sha256Target = sha256Limit;
-            if (UintToArith256(hash) <= sha256Target) {
-                LogPrintf("📏 SHA256 hash <= target ✅\n");
-                return true;
-            }
+       // Use the block's encoded nBits target directly. This is the chain's
+        // consensus difficulty for this height, set by DGW3-Nova.
+        //
+        // Earlier versions clamped the effective target DOWN to the SHA256
+        // powLimit (Bitcoin-style ~0x00000000ffff...), reasoning that SHA256
+        // miners should always face >=1 work. That clamp made post-fork
+        // solo-mining impossible: nBits inherited from Yespower is much
+        // looser than sha256Limit, so the clamp required ASIC-level SHA256
+        // hashpower just to clear the very first block. DGW3-Nova's emergency
+        // trigger + decay-from-baseline will ramp difficulty up to honest
+        // SHA256 levels within ~10-30 blocks on its own; the clamp is both
+        // unnecessary and harmful during the transition.
+        //
+        // The upper bound (bnTarget > yespowerLimit) is still enforced above,
+        // so a block can't be artificially trivial beyond the chain's
+        // declared minimum difficulty.
+        (void)sha256Limit; // retained for potential future use
+        if (UintToArith256(hash) <= bnTarget) {
+            LogPrintf("📏 SHA256 hash <= target ✅\n");
+            return true;
         }
 
         // ---- Yespower path: open during grace window, or armed via emergency timeout ----
