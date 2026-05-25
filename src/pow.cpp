@@ -17,7 +17,6 @@ unsigned int DarkGravityWave3Nova(const CBlockIndex* pindexLast, const Consensus
 unsigned int Lwma3(const CBlockIndex* pindexLast, const Consensus::Params& params);
 
 // Dual-PoW helpers ------------------------------------------------------------
-//
 // At `sha256ReactivationHeight` SHA256 becomes the primary PoW and is
 // ALWAYS accepted from that height onward. Yespower is retained as an
 // additive emergency fallback that arms when the time gap between the
