@@ -69,6 +69,12 @@ jobs:
           cd nedb-ffi
           cargo build --release
           echo "libnedb_ffi.a: $(du -sh target/release/libnedb_ffi.a | cut -f1)"
+          # Install into the linker search path so -lnedb_ffi resolves
+          # without a path — avoids $GITHUB_WORKSPACE host-vs-container
+          # path mismatch and prevents ./configure from choking on a .a
+          # file embedded in LDFLAGS during compiler detection tests.
+          cp target/release/libnedb_ffi.a /usr/local/lib/
+          echo "installed: $(ls -lh /usr/local/lib/libnedb_ffi.a)"
       # ─────────────────────────────────────────────────────────────────────
 
       - name: Build Berkeley DB 4.8 (portable) from observerdev/db-4.8.30
@@ -100,11 +106,10 @@ jobs:
           BDB_CFLAGS: "-I${{ github.workspace }}/db4/include"
           CPPFLAGS: "-I${{ github.workspace }}/db4/include"
           # Portable trick: ship with static libstdc++ / libgcc, leave glibc dynamic.
-          # libnedb_ffi.a is appended as a full path — LDFLAGS is processed AFTER
-          # LDADD, so it lands after libinterchained_wallet.a in the link command,
-          # which is the correct order for the static archive symbol scan.
+          # -lnedb_ffi resolves from /usr/local/lib (installed in the NEDB build step).
+          # Using -l instead of a full path avoids breaking ./configure's compiler tests.
           # -lpthread -ldl satisfy the Rust staticlib runtime on Linux.
-          LDFLAGS: "-L${{ github.workspace }}/db4/lib -static-libstdc++ -static-libgcc ${{ github.workspace }}/nedb-ffi/target/release/libnedb_ffi.a -lpthread -ldl"
+          LDFLAGS: "-L${{ github.workspace }}/db4/lib -static-libstdc++ -static-libgcc -lnedb_ffi -lpthread -ldl"
           CFLAGS: "-O2"
           CXXFLAGS: "-O2 -std=c++14"
         run: |
