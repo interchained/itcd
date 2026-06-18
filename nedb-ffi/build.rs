@@ -10,6 +10,7 @@ fn main() {
     cbindgen::Builder::new()
         .with_crate(crate_dir)
         .with_language(cbindgen::Language::C)
+        .with_cpp_compat(true)
         .with_include_guard("NEDB_FFI_H")
         .with_documentation(true)
         .generate()

@@ -99,11 +99,13 @@ jobs:
           rm -rf "$TMPV"
           [ "$BITCODE" -eq 0 ] || { echo "ERROR: archive still contains LLVM bitcode"; exit 1; }
 
-          # Verify nedb_* symbols are real text-section exports
+          # Verify nedb_* symbols are real text-section exports and that
+          # cbindgen preserved C++ compatibility in the generated header.
           SYMS=$(nm target/release/libnedb_ffi.a 2>/dev/null | grep -c ' T nedb_' || echo 0)
           echo "nedb_* T-symbols: $SYMS"
           nm target/release/libnedb_ffi.a 2>/dev/null | grep ' T nedb_' | head -10
           [ "$SYMS" -gt 0 ] || { echo "ERROR: no nedb_* T symbols — still bitcode?"; exit 1; }
+          grep -q 'extern "C"' nedb.h || { echo "ERROR: generated nedb.h lacks extern C guard"; exit 1; }
 
           # Generate the libtool wrapper consumed by src/Makefile.am LDADD.
           # This keeps libnedb_ffi.a in the app link line without leaking it
