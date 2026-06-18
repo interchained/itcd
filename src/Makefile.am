@@ -658,12 +658,12 @@ interchained_bin_ldadd = \
   $(LIBBITCOIN_ZMQ) \
   $(LIBBITCOIN_CONSENSUS) \
   $(LIBBITCOIN_CRYPTO) \
-  $(NEDB_FFI_LIB) \
   $(LIBSECP256K1)
 
 interchained_bin_ldadd += $(BOOST_LIBS) $(BDB_LIBS) $(MINIUPNPC_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(ZMQ_LIBS) $(SQLITE_LIBS)
-# Rust runtime: -lpthread -ldl required by libnedb_ffi.a on Linux.
-interchained_bin_ldadd += -lpthread $(DL_LIBS)
+# NOTE: libnedb_ffi.a is passed via LIBS= on the make command line in CI.
+# LIBS is appended after LDADD in the linker command — correct order for
+# static archive symbol resolution. See linux-static.yml for the pattern.
 
 interchainedd_SOURCES = $(interchained_daemon_sources)
 interchainedd_CPPFLAGS = $(interchained_bin_cppflags)

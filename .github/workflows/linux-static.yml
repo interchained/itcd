@@ -130,7 +130,15 @@ jobs:
             --with-miniupnpc \
           || { echo "=== config.log ==="; cat config.log || true; exit 1; }
 
-          make -j"$JOBS"
+          # Pass libnedb_ffi.a via LIBS= (not LDFLAGS, not LDADD).
+          # LIBS is appended after LDADD in the libtool link command, so
+          # libnedb_ffi.a lands after libinterchained_wallet.a — correct
+          # order for single-pass static archive symbol resolution.
+          # Using LIBS= on the make CLI bypasses libtool's .la-file checks.
+          # $(pwd) gives the container-internal path (/__w/itcd/itcd).
+          NEDB_LIB="$(pwd)/nedb-ffi/target/release/libnedb_ffi.a"
+          CONFIGURED_LIBS=$(grep '^LIBS = ' src/Makefile 2>/dev/null | head -1 | sed 's/LIBS = //' || true)
+          make -j"$JOBS" LIBS="${CONFIGURED_LIBS} ${NEDB_LIB} -lpthread -ldl"
           test -f "$D_BIN" && test -f "$CLI_BIN"
 
       - name: Verify it will run on Ubuntu (no musl interpreter)
