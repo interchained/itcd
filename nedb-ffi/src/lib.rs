@@ -140,7 +140,18 @@ pub extern "C" fn nedb_open(path: *const c_char, _dek: *const c_char) -> *mut Ne
 
 #[no_mangle]
 pub extern "C" fn nedb_close(handle: *mut NedbHandle) {
-    if !handle.is_null() { unsafe { drop(Box::from_raw(handle)) } }
+    if handle.is_null() { return; }
+    #[cfg(feature = "phase2")]
+    {
+        // Flush the id-index WAL and MANIFEST before dropping.
+        // IdIndex::set() is WAL-only (zero disk I/O on hot path); a background
+        // ticker flushes it every 1s. Without explicit flush here, the WAL
+        // DashMap is dropped with the Db and unflushed writes are lost —
+        // breaking data persistence across close/reopen.
+        let h = unsafe { &*handle };
+        h.db.flush_all();
+    }
+    unsafe { drop(Box::from_raw(handle)) }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
