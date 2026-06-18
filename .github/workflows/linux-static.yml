@@ -100,8 +100,11 @@ jobs:
           BDB_CFLAGS: "-I${{ github.workspace }}/db4/include"
           CPPFLAGS: "-I${{ github.workspace }}/db4/include"
           # Portable trick: ship with static libstdc++ / libgcc, leave glibc dynamic.
-          # -lpthread -ldl are required by the NEDB FFI Rust staticlib on Linux.
-          LDFLAGS: "-L${{ github.workspace }}/db4/lib -static-libstdc++ -static-libgcc -lpthread -ldl"
+          # libnedb_ffi.a is appended as a full path — LDFLAGS is processed AFTER
+          # LDADD, so it lands after libinterchained_wallet.a in the link command,
+          # which is the correct order for the static archive symbol scan.
+          # -lpthread -ldl satisfy the Rust staticlib runtime on Linux.
+          LDFLAGS: "-L${{ github.workspace }}/db4/lib -static-libstdc++ -static-libgcc ${{ github.workspace }}/nedb-ffi/target/release/libnedb_ffi.a -lpthread -ldl"
           CFLAGS: "-O2"
           CXXFLAGS: "-O2 -std=c++14"
         run: |

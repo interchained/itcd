@@ -17,15 +17,12 @@ EXTRA_LIBRARIES =
 NEDB_FFI_DIR  = $(abs_top_srcdir)/nedb-ffi
 NEDB_FFI_LIB  = $(NEDB_FFI_DIR)/target/release/libnedb_ffi.a
 
-$(NEDB_FFI_LIB): FORCE
+# Build rule for local (non-CI) builds. CI pre-builds libnedb_ffi.a in a
+# dedicated step before ./configure && make so make never triggers this.
+$(NEDB_FFI_LIB):
 	$(AM_V_GEN) cd $(NEDB_FFI_DIR) && cargo build --release
-
-FORCE:
-.PHONY: FORCE
 # ─────────────────────────────────────────────────────────────────────────────
-# Note: libnedb_ffi.a is pre-built by CI before ./configure && make runs.
-# The $(NEDB_FFI_LIB) entry in interchained_bin_ldadd passes it to the linker.
-# For local non-CI builds: run `cd nedb-ffi && cargo build --release` first.
+# For local builds: run `cd nedb-ffi && cargo build --release` then make.
 
 if EMBEDDED_UNIVALUE
 LIBUNIVALUE = univalue/libunivalue.la
@@ -661,12 +658,12 @@ interchained_bin_ldadd = \
   $(LIBBITCOIN_ZMQ) \
   $(LIBBITCOIN_CONSENSUS) \
   $(LIBBITCOIN_CRYPTO) \
-  $(NEDB_FFI_LIB) \
   $(LIBSECP256K1)
 
 interchained_bin_ldadd += $(BOOST_LIBS) $(BDB_LIBS) $(MINIUPNPC_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(ZMQ_LIBS) $(SQLITE_LIBS)
-# NEDB FFI Rust runtime deps (pthread + dl on Linux/macOS; MSVC handles Windows)
-interchained_bin_ldadd += -lpthread $(DL_LIBS)
+# NEDB FFI library is passed via LDFLAGS in CI (full absolute path, comes after
+# C++ archives in link order so symbols resolve correctly). For local builds:
+# run `cd nedb-ffi && cargo build --release` then add the path manually.
 
 interchainedd_SOURCES = $(interchained_daemon_sources)
 interchainedd_CPPFLAGS = $(interchained_bin_cppflags)
