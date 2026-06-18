@@ -669,21 +669,23 @@ interchained_bin_ldadd = \
   $(LIBSECP256K1)
 
 interchained_bin_ldadd += $(BOOST_LIBS) $(BDB_LIBS) $(MINIUPNPC_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(ZMQ_LIBS) $(SQLITE_LIBS)
-# NOTE: libnedb_ffi.a is injected via `LIBS +=` into the generated src/Makefile
-# after ./configure runs. $(LIBS) appears AFTER $(LDADD) in all generated link
-# commands, bypassing libtool's archive-bucket reordering entirely. See CI.
+# NEDB-backed binaries link the Rust FFI through a libtool wrapper so the
+# archive stays after the Bitcoin-style C++ archives that reference nedb_*.
+# Keep this scoped to app links; adding it to global LIBS also affects helper
+# libraries such as libinterchainedconsensus.la and does not reliably resolve
+# the final executable link order.
 
 interchainedd_SOURCES = $(interchained_daemon_sources)
 interchainedd_CPPFLAGS = $(interchained_bin_cppflags)
 interchainedd_CXXFLAGS = $(interchained_bin_cxxflags)
 interchainedd_LDFLAGS = $(interchained_bin_ldflags)
-interchainedd_LDADD = $(LIBBITCOIN_SERVER) $(interchained_bin_ldadd)
+interchainedd_LDADD = $(LIBBITCOIN_SERVER) $(interchained_bin_ldadd) $(NEDB_FFI_LA)
 
 interchained_node_SOURCES = $(interchained_daemon_sources)
 interchained_node_CPPFLAGS = $(interchained_bin_cppflags)
 interchained_node_CXXFLAGS = $(interchained_bin_cxxflags)
 interchained_node_LDFLAGS = $(interchained_bin_ldflags)
-interchained_node_LDADD = $(LIBBITCOIN_SERVER) $(interchained_bin_ldadd)
+interchained_node_LDADD = $(LIBBITCOIN_SERVER) $(interchained_bin_ldadd) $(NEDB_FFI_LA)
 
 # interchained-cli binary #
 interchained_cli_SOURCES = interchained-cli.cpp
@@ -730,7 +732,7 @@ interchained_wallet_SOURCES = interchained-wallet.cpp
 interchained_wallet_CPPFLAGS = $(interchained_bin_cppflags)
 interchained_wallet_CXXFLAGS = $(interchained_bin_cxxflags)
 interchained_wallet_LDFLAGS = $(interchained_bin_ldflags)
-interchained_wallet_LDADD = $(LIBBITCOIN_WALLET_TOOL) $(interchained_bin_ldadd)
+interchained_wallet_LDADD = $(LIBBITCOIN_WALLET_TOOL) $(interchained_bin_ldadd) $(NEDB_FFI_LA)
 
 if TARGET_WINDOWS
 interchained_wallet_SOURCES += interchained-wallet-res.rc

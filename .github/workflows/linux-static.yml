@@ -104,6 +104,16 @@ jobs:
           echo "nedb_* T-symbols: $SYMS"
           nm target/release/libnedb_ffi.a 2>/dev/null | grep ' T nedb_' | head -10
           [ "$SYMS" -gt 0 ] || { echo "ERROR: no nedb_* T symbols — still bitcode?"; exit 1; }
+
+          # Generate the libtool wrapper consumed by src/Makefile.am LDADD.
+          # This keeps libnedb_ffi.a in the app link line without leaking it
+          # into helper library links through global LIBS.
+          cat > target/release/libnedb_ffi.la <<'EOF'
+# libnedb_ffi.la - CI-generated libtool wrapper for Rust staticlib
+old_library='libnedb_ffi.a'
+libdir=''
+EOF
+          test -f target/release/libnedb_ffi.la
       # ─────────────────────────────────────────────────────────────────────
 
       - name: Build Berkeley DB 4.8 (portable) from observerdev/db-4.8.30
@@ -163,18 +173,10 @@ jobs:
             --with-miniupnpc \
           || { echo "=== config.log ==="; cat config.log || true; exit 1; }
 
-          # Link the real Rust archive after all Bitcoin-style C++ archives.
-          # GNU ld resolves static archives left-to-right; the generated link
-          # commands place $(LIBS) after $(LDADD), so appending libnedb_ffi.a
-          # there keeps nedb_* symbols visible when libinterchained_server.a
-          # and libinterchained_wallet.a reference them. This avoids the prior
-          # fragile archive-mutation path, which could be lost if make rebuilt
-          # the C++ archives before the final binary link.
-          NEDB_LIB="$(pwd)/nedb-ffi/target/release/libnedb_ffi.a"
-          test -f "$NEDB_LIB"
-          nm "$NEDB_LIB" | grep ' T nedb_get'
-          printf '\n# CI: resolve NEDB FFI references after Automake LDADD archives\nLIBS += %s\n' "$NEDB_LIB" >> src/Makefile
-          grep '^LIBS += .*libnedb_ffi\.a' src/Makefile
+          # src/Makefile.am links NEDB-consuming binaries through the generated
+          # libtool wrapper, keeping the FFI archive scoped to app links.
+          test -f "$(pwd)/nedb-ffi/target/release/libnedb_ffi.la"
+          nm "$(pwd)/nedb-ffi/target/release/libnedb_ffi.a" | grep ' T nedb_get'
 
           make -j"$JOBS"
           test -f "$D_BIN" && test -f "$CLI_BIN"
