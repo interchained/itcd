@@ -161,19 +161,26 @@ jobs:
             --with-miniupnpc \
           || { echo "=== config.log ==="; cat config.log || true; exit 1; }
 
-          # Inject libnedb_ffi.a via LIBS += in the generated src/Makefile.
-          # Rationale: libtool's binary-link reconstruction sorts archive buckets
-          # regardless of _LDADD order — .la files, raw .a files, and -l flags
-          # all end up reordered. The only position libtool cannot touch is $(LIBS),
-          # which automake emits AFTER $(LDADD) in every link rule:
-          #   $(LINK) $(objects) $(LDADD) $(LIBS)
-          # By appending to LIBS in the generated Makefile (post-configure), we
-          # guarantee NEDB FFI lands after libinterchained_wallet.a. --whole-archive
-          # ensures all symbols are included even if ld's scan position is imperfect.
-          # -Wl, prefix bypasses libtool's own archive-path processing.
+          # Bypass libtool ordering entirely: build the C++ static archives first,
+          # then merge libnedb_ffi.a objects INTO them with `ar`, then run make
+          # again to complete the binary link. The linker finds nedb_* symbols
+          # already inside libinterchained_server.a / libinterchained_wallet.a —
+          # no separate library, no ordering problem, no libtool interference.
           NEDB_LIB="$(pwd)/nedb-ffi/target/release/libnedb_ffi.a"
-          echo "LIBS += -Wl,--whole-archive -Wl,${NEDB_LIB} -Wl,--no-whole-archive -lpthread -ldl" >> src/Makefile
-          echo "LIBS patch: $(grep '^LIBS +=' src/Makefile)"
+
+          # Step 1: build the two C++ static archives (no binary link yet)
+          make -j"$JOBS" -C src libinterchained_server.a libinterchained_wallet.a
+
+          # Step 2: extract NEDB objects and merge into the C++ archives
+          TMPDIR_NEDB=$(mktemp -d)
+          (cd "$TMPDIR_NEDB" && ar x "$NEDB_LIB")
+          NEDB_OBJS=$(ls "$TMPDIR_NEDB"/*.o 2>/dev/null | wc -l)
+          echo "Merging ${NEDB_OBJS} NEDB objects into libinterchained_server.a and libinterchained_wallet.a"
+          ar qcs src/libinterchained_server.a "$TMPDIR_NEDB"/*.o
+          ar qcs src/libinterchained_wallet.a "$TMPDIR_NEDB"/*.o
+          rm -rf "$TMPDIR_NEDB"
+
+          # Step 3: complete the build (link step finds NEDB symbols in the archives)
           make -j"$JOBS"
           test -f "$D_BIN" && test -f "$CLI_BIN"
 
