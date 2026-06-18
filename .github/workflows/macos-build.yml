@@ -1,0 +1,148 @@
+name: macOS Build — Intel x86_64 (for iMac)
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+      - "release-*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: macos-intel • x86_64
+    runs-on: macos-13  # GitHub's Intel Mac runner
+
+    env:
+      ARTIFACT_DIR: out
+      PKG_NAME: interchained-macos-x86_64-${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+      D_BIN: src/interchainedd
+      CLI_BIN: src/interchained-cli
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Compute parallel jobs
+        run: |
+          J=$(sysctl -n hw.logicalcpu || echo 4)
+          echo "JOBS=$J" >> "$GITHUB_ENV"
+
+      - name: Install build deps (Homebrew)
+        run: |
+          brew update
+          brew install autoconf automake libtool pkg-config \
+            boost libevent miniupnpc zeromq sqlite
+
+      - name: Install Rust (stable, minimal)
+        uses: dtolnay/rust-toolchain@stable
+
+      # ── NEDB FFI: build real Rust staticlib ─────────────────────────────
+      - name: Build NEDB FFI — real Rust impl (lto patched, embed-bitcode=no)
+        run: |
+          # Same lto=false patch as linux-static.yml — identical LTO issue on macOS
+          sed -i '' 's/^lto[[:space:]]*=.*/lto = false/' nedb-ffi/Cargo.toml
+          echo "Profile after patch:"; grep -E '^(lto|opt-level|codegen-units)' nedb-ffi/Cargo.toml
+          cd nedb-ffi
+          RUSTFLAGS="-C embed-bitcode=no" cargo rustc --release --crate-type=staticlib
+          echo "libnedb_ffi.a: $(du -sh target/release/libnedb_ffi.a | cut -f1)"
+
+          # Verify ELF/Mach-O native objects (no bitcode)
+          TMPV=$(mktemp -d)
+          (cd "$TMPV" && ar x "$(pwd)/target/release/libnedb_ffi.a" 2>/dev/null || true)
+          BITCODE=0
+          for f in "$TMPV"/*nedb_ffi*.o; do
+            [ -f "$f" ] || continue
+            magic=$(head -c4 "$f" | od -An -tx1 | tr -d ' \n')
+            case "$magic" in
+              7f454c46*|cffaedfe*|cefaedfe*) echo "OK Mach-O/ELF: $(basename $f)" ;;
+              4243c0de*|42c3c0de*) echo "BITCODE: $(basename $f)"; BITCODE=1 ;;
+              *) echo "UNK $magic: $(basename $f)" ;;
+            esac
+          done
+          rm -rf "$TMPV"
+          [ "$BITCODE" -eq 0 ] || { echo "ERROR: still LLVM bitcode"; exit 1; }
+
+          SYMS=$(nm target/release/libnedb_ffi.a 2>/dev/null | grep -c ' T _nedb_' || echo 0)
+          echo "nedb_* T-symbols: $SYMS"
+          [ "$SYMS" -gt 0 ] || { echo "ERROR: no nedb_* symbols"; exit 1; }
+      # ─────────────────────────────────────────────────────────────────────
+
+      - name: Build Berkeley DB 4.8 (from source — brew db4 may conflict)
+        run: |
+          set -eux
+          git clone --depth=1 https://github.com/observerdev/db-4.8.30.git bdb-src
+          sed -i '' 's/__atomic_compare_exchange/__db_atomic_compare_exchange/g' \
+            bdb-src/dbinc/atomic.h
+          cd bdb-src/build_unix
+          CFLAGS="-O2 -fPIC" \
+          ../dist/configure \
+            --prefix="$GITHUB_WORKSPACE/db4" \
+            --enable-cxx --disable-shared --with-pic
+          make -j"$JOBS"
+          make install
+
+          cd "$GITHUB_WORKSPACE/db4/lib"
+          [ -f libdb_cxx.a ] && ln -sf libdb_cxx.a libdb_cxx-4.8.a || true
+          [ -f libdb.a ]     && ln -sf libdb.a     libdb-4.8.a     || true
+
+      - name: Configure & Build (macOS Intel)
+        env:
+          BDB_PREFIX: ${{ github.workspace }}/db4
+          CPPFLAGS: "-I${{ github.workspace }}/db4/include"
+          CFLAGS:   "-O2"
+          CXXFLAGS: "-O2 -std=c++14"
+          # macOS: no -static-libstdc++ / no -Wl,-z flags
+          LDFLAGS:  "-L${{ github.workspace }}/db4/lib"
+        run: |
+          set -eux
+          ./autogen.sh
+          export CPATH="$BDB_PREFIX/include:${CPATH:-}"
+
+          BDB_LIBS="$BDB_PREFIX/lib/libdb_cxx-4.8.a $BDB_PREFIX/lib/libdb-4.8.a -pthread"
+
+          ./configure \
+            --enable-wallet \
+            --with-incompatible-bdb \
+            --without-gui \
+            --disable-bench \
+            --disable-tests \
+            --with-zmq \
+            --with-miniupnpc \
+          || { echo "=== config.log ==="; cat config.log || true; exit 1; }
+
+          # macOS nm uses T _nedb_ (underscore prefix) — append archive to LIBS
+          NEDB_LIB="$(pwd)/nedb-ffi/target/release/libnedb_ffi.a"
+          echo "LIBS += -Wl,-force_load,${NEDB_LIB} -lpthread" >> src/Makefile
+
+          make -j"$JOBS"
+          test -f "$D_BIN" && test -f "$CLI_BIN"
+          file "$D_BIN"
+
+      - name: Strip & package
+        run: |
+          set -eux
+          mkdir -p "$ARTIFACT_DIR"
+          cp -v "$D_BIN" "$CLI_BIN" "$ARTIFACT_DIR"/
+          strip "$ARTIFACT_DIR/$(basename "$D_BIN")"  || true
+          strip "$ARTIFACT_DIR/$(basename "$CLI_BIN")" || true
+          [ -f README.md ] && cp README.md "$ARTIFACT_DIR"/ || true
+          [ -f COPYING ]   && cp COPYING   "$ARTIFACT_DIR"/ || true
+          shasum -a 256 "$ARTIFACT_DIR/interchainedd" "$ARTIFACT_DIR/interchained-cli" \
+            > "$ARTIFACT_DIR/SHA256SUMS"
+          tar -C "$ARTIFACT_DIR" -czf "${PKG_NAME}.tar.gz" .
+          echo "Binary: $(du -sh $ARTIFACT_DIR/interchainedd)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PKG_NAME }}
+          path: ${{ env.PKG_NAME }}.tar.gz
+          if-no-files-found: error

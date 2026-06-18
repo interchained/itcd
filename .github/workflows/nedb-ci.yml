@@ -38,6 +38,11 @@ jobs:
             lib_path: nedb-ffi/target/release/libnedb_ffi.a
             artifact: libnedb_ffi-macos-arm64.a
 
+          - name:     macos-x86_64
+            os:       macos-13   # Intel runner — for iMac / MacBook Pro Intel
+            lib_path: nedb-ffi/target/release/libnedb_ffi.a
+            artifact: libnedb_ffi-macos-x86_64.a
+
           - name:     windows-x86_64
             os:       windows-latest
             lib_path: nedb-ffi/target/release/nedb_ffi.lib
