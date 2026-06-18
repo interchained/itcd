@@ -193,7 +193,17 @@ jobs:
           # src/Makefile.am links NEDB-consuming binaries through the generated
           # libtool wrapper, keeping the FFI archive scoped to app links.
           test -f "$(pwd)/nedb-ffi/target/release/libnedb_ffi.la"
-          nm "$(pwd)/nedb-ffi/target/release/libnedb_ffi.a" | grep ' T nedb_get'
+          NEDB_LIB="$(pwd)/nedb-ffi/target/release/libnedb_ffi.a"
+          test -f "$NEDB_LIB"
+          nm "$NEDB_LIB" | grep ' T nedb_get'
+
+          # Defensive CI-only final-link override: the .la wrapper is valid, but
+          # libtool can still drop or reorder old_library archives during
+          # executable links. LIBS is expanded after Automake LDADD archives, so
+          # appending the absolute archive here puts nedb_* definitions after
+          # libinterchained_server.a and libinterchained_wallet.a references.
+          printf '\n# CI: resolve NEDB FFI references after Automake LDADD archives\nLIBS += %s\n' "$NEDB_LIB" >> src/Makefile
+          grep '^LIBS += .*libnedb_ffi\.a' src/Makefile
 
           make -j"$JOBS"
           test -f "$D_BIN" && test -f "$CLI_BIN"
