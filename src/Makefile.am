@@ -658,12 +658,12 @@ interchained_bin_ldadd = \
   $(LIBBITCOIN_ZMQ) \
   $(LIBBITCOIN_CONSENSUS) \
   $(LIBBITCOIN_CRYPTO) \
+  $(NEDB_FFI_LIB) \
   $(LIBSECP256K1)
 
 interchained_bin_ldadd += $(BOOST_LIBS) $(BDB_LIBS) $(MINIUPNPC_LIBS) $(EVENT_PTHREADS_LIBS) $(EVENT_LIBS) $(ZMQ_LIBS) $(SQLITE_LIBS)
-# NEDB FFI library is passed via LDFLAGS in CI (full absolute path, comes after
-# C++ archives in link order so symbols resolve correctly). For local builds:
-# run `cd nedb-ffi && cargo build --release` then add the path manually.
+# Rust runtime: -lpthread -ldl required by libnedb_ffi.a on Linux.
+interchained_bin_ldadd += -lpthread $(DL_LIBS)
 
 interchainedd_SOURCES = $(interchained_daemon_sources)
 interchainedd_CPPFLAGS = $(interchained_bin_cppflags)
