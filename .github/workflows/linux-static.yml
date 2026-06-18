@@ -73,43 +73,33 @@ jobs:
       - name: Generate libnedb_ffi.la libtool wrapper
         # libtool sorts raw .a files (no .la companion) into a deplibs bucket
         # that lands BEFORE the _a archives in the binary link command, causing
-        # GNU ld's single-pass scan to discard nedb_* symbols before the wallet/
-        # server archives create the outstanding refs. With a .la, libtool treats
-        # it as a first-class participant and preserves _LDADD placement order.
+        # GNU ld's single-pass scan to discard nedb_* symbols before the wallet
+        # server archives create outstanding refs. With a .la, libtool treats it
+        # as a first-class participant and preserves _LDADD placement order.
         run: |
           NEDB_DIR="$(pwd)/nedb-ffi/target/release"
           NATIVE_LIBS=$(cd nedb-ffi && \
             cargo rustc --release --crate-type staticlib -- \
               --print native-static-libs 2>&1 \
             | grep "native-static-libs:" \
-            | sed 's/.*native-static-libs: //' | head -1 || echo "-lpthread -ldl -lm")
-          NATIVE_LIBS="${NATIVE_LIBS:--lpthread -ldl -lm}"
-          python3 - <<PYEOF
-import os
-nedb_dir = "${NEDB_DIR}"
-native_libs = "${NATIVE_LIBS}"
-la_content = "\n".join([
-  "dlname=''",
-  "library_names=''",
-  "old_library='libnedb_ffi.a'",
-  "inherited_linker_flags=''",
-  "dependency_libs='" + native_libs + "'",
-  "weak_library_names=''",
-  "current=0",
-  "age=0",
-  "revision=0",
-  "installed=yes",
-  "shouldnotlink=no",
-  "dlopen=''",
-  "dlpreopen=''",
-  "libdir='" + nedb_dir + "'",
-  "",
-])
-with open(os.path.join(nedb_dir, "libnedb_ffi.la"), "w") as f:
-    f.write(la_content)
-print("Generated libnedb_ffi.la in", nedb_dir)
-print("dependency_libs:", native_libs)
-PYEOF
+            | sed 's/.*native-static-libs: //' | head -1 \
+            || true)
+          NATIVE_LIBS="${NATIVE_LIBS:-"-lpthread -ldl -lm"}"
+          {
+            printf "dlname=''\n"
+            printf "library_names=''\n"
+            printf "old_library='libnedb_ffi.a'\n"
+            printf "inherited_linker_flags=''\n"
+            printf "dependency_libs='%s'\n" "${NATIVE_LIBS}"
+            printf "weak_library_names=''\n"
+            printf "current=0\nage=0\nrevision=0\n"
+            printf "installed=yes\n"
+            printf "shouldnotlink=no\n"
+            printf "dlopen=''\ndlpreopen=''\n"
+            printf "libdir='%s'\n" "${NEDB_DIR}"
+          } > "${NEDB_DIR}/libnedb_ffi.la"
+          echo "Generated ${NEDB_DIR}/libnedb_ffi.la"
+          echo "  dependency_libs=${NATIVE_LIBS}"
       # ─────────────────────────────────────────────────────────────────────
 
       - name: Build Berkeley DB 4.8 (portable) from observerdev/db-4.8.30
