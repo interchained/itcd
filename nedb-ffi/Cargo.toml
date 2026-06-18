@@ -1,6 +1,6 @@
 [package]
 name        = "nedb-ffi"
-version     = "0.1.0"
+version     = "0.2.0"
 edition     = "2021"
 description = "C FFI bridge — exposes the NEDB DAG engine to the ITC C++ node (replaces LevelDB)"
 license     = "MIT"
@@ -11,32 +11,30 @@ name       = "nedb_ffi"
 # cdylib    → shared .so/.dylib for dynamic linking
 crate-type = ["staticlib", "cdylib"]
 
-# ── Phase 2 feature flag ───────────────────────────────────────────────────
-# Enable with: cargo build --release --features phase2
+# ── Feature flags ─────────────────────────────────────────────────────────────
+# Phase 2 is now the default. It activates nedb_core_v2::Db as storage:
+#   - Real BLAKE2b-512 Merkle chain head (MANIFEST Merkle root)
+#   - MVCC AS OF seq — any UTXO state at any block height
+#   - Causal provenance: caused_by = prev_node_hash
+#   - AES-256-GCM encryption via NEDB_TMK env var
 #
-# Phase 1 (default): BTreeMap-backed in-process store.
-#   Proves the C FFI surface, CDBWrapper shim, and CI pipeline.
-#   Zero external dependencies beyond hex + blake2.
-#
-# Phase 2: nedb_core_v2::Db — real BLAKE2b chain head, MVCC AS OF,
-#   causal DAG (caused_by), AES-256-GCM via NEDB_TMK, full TRACE.
-#   One feature flag away from production.
+# To build Phase 1 (BTreeMap in-process, no persistence):
+#   cargo build --release --no-default-features
 [features]
-default = []
-phase2  = ["nedb-core-v2"]
+default = ["phase2"]
+phase2  = ["nedb-core-v2", "serde_json"]
 
-# ── Dependencies ──────────────────────────────────────────────────────────
+# ── Dependencies ──────────────────────────────────────────────────────────────
 [dependencies]
 hex    = "0.4"
-blake2 = "0.10"   # Phase 1 BLAKE2b chain head
+blake2 = { version = "0.10", optional = true }  # Phase 1 only (not needed in phase2)
 
-# Phase 2: real NEDB DAG engine.
-# Uncomment the dep below AND enable the phase2 feature to activate.
-# The crate lives in rust/nedb-v2/ inside the nedb engine repo.
+# Phase 2: real NEDB DAG engine (activated by default).
 nedb-core-v2 = { git = "https://github.com/Eth-Interchained/nedb", package = "nedb-core-v2", optional = true }
+serde_json   = { version = "1", optional = true }
 
 [build-dependencies]
-# cbindgen auto-generates nedb.h from the #[no_mangle] exports in src/lib.rs
+# cbindgen generates nedb.h from #[no_mangle] exports with C++ compat guards.
 cbindgen = "0.26"
 
 [profile.release]
