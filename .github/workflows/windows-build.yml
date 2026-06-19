@@ -53,16 +53,18 @@ jobs:
             mingw-w64-x86_64-zlib
             perl
 
-      - name: Install Rust stable + x86_64-pc-windows-gnu target
+      - name: Add x86_64-pc-windows-gnu Rust target
+        # windows-latest already has Rust stable — just add the MinGW target
+        shell: pwsh
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --default-toolchain stable
-          source "$HOME/.cargo/env"
+          rustup default stable
           rustup target add x86_64-pc-windows-gnu
+          Write-Host "Rust $(rustc --version)"
+          Write-Host "Targets: $(rustup target list --installed)"
 
       - name: Build NEDB FFI (x86_64-pc-windows-gnu)
         run: |
-          source "$HOME/.cargo/env"
+          export PATH="$USERPROFILE/.cargo/bin:$PATH"
           sed -i 's/^lto[[:space:]]*=.*/lto = false/' nedb-ffi/Cargo.toml
           cd nedb-ffi
           RUSTFLAGS="-C embed-bitcode=no" \
@@ -133,7 +135,7 @@ jobs:
 
       - name: Configure & Build interchainedd.exe
         run: |
-          source "$HOME/.cargo/env"
+          export PATH="$USERPROFILE/.cargo/bin:$PATH"
           J=$(nproc || echo 4)
           BDB_PREFIX="$GITHUB_WORKSPACE/db4"
 
