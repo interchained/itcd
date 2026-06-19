@@ -627,7 +627,12 @@ bool BerkeleyDatabase::Backup(const std::string& strDest) const
                         return false;
                     }
 
+                    // Boost 1.74+ renamed copy_option → copy_options; 1.85 removed the old name
+#if BOOST_VERSION >= 107400
                     fs::copy_file(pathSrc, pathDest, fs::copy_options::overwrite_existing);
+#else
+                    fs::copy_file(pathSrc, pathDest, fs::copy_option::overwrite_if_exists);
+#endif
                     LogPrintf("copied %s to %s\n", strFile, pathDest.string());
                     return true;
                 } catch (const fs::filesystem_error& e) {
