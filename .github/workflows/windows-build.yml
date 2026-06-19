@@ -133,6 +133,7 @@ jobs:
 
           BDB_CFLAGS="-I${BDB_PREFIX}/include" \
           BDB_LIBS="-L${BDB_PREFIX}/lib -ldb_cxx -ldb" \
+          ac_cv_header_dlfcn_h=no \
           ./configure \
             --enable-wallet \
             --with-incompatible-bdb \
