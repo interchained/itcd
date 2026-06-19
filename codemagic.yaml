@@ -55,9 +55,27 @@ workflows:
       - name: Build Berkeley DB 4.8 from source
         script: |
           J=$(sysctl -n hw.logicalcpu || echo 4)
+          rm -rf /tmp/bdb-src
           git clone --depth=1 https://github.com/observerdev/db-4.8.30.git /tmp/bdb-src
-          sed -i '' 's/__atomic_compare_exchange/__db_atomic_compare_exchange/g' \
-            /tmp/bdb-src/dbinc/atomic.h
+
+          # Patch Berkeley DB 4.8 for modern Apple Clang / libc++.
+          # Fixes:
+          # - __atomic_compare_exchange compiler builtin collision
+          # - atomic_init macro collision with libc++ <atomic>
+          find /tmp/bdb-src -type f \( \
+            -name '*.h' -o \
+            -name '*.c' -o \
+            -name '*.cc' -o \
+            -name '*.cpp' \
+          \) -print0 | xargs -0 perl -pi -e '
+            s/\b__atomic_compare_exchange\b/__db_atomic_compare_exchange/g;
+            s/\batomic_init\s*\(/db_atomic_init(/g;
+          '
+
+          if grep -R "^[[:space:]]*#define[[:space:]]\+atomic_init" /tmp/bdb-src; then
+            echo "ERROR: Berkeley DB atomic_init macro survived patch"
+            exit 1
+          fi
           cd /tmp/bdb-src/build_unix
           CFLAGS="-O2 -fPIC" ../dist/configure \
             --prefix="$CM_BUILD_DIR/db4" --enable-cxx --disable-shared --with-pic
@@ -165,9 +183,27 @@ workflows:
       - name: Build Berkeley DB 4.8 (x86_64 via Rosetta)
         script: |
           J=$(sysctl -n hw.logicalcpu || echo 4)
+          rm -rf /tmp/bdb-src
           git clone --depth=1 https://github.com/observerdev/db-4.8.30.git /tmp/bdb-src
-          sed -i '' 's/__atomic_compare_exchange/__db_atomic_compare_exchange/g' \
-            /tmp/bdb-src/dbinc/atomic.h
+
+          # Patch Berkeley DB 4.8 for modern Apple Clang / libc++.
+          # Fixes:
+          # - __atomic_compare_exchange compiler builtin collision
+          # - atomic_init macro collision with libc++ <atomic>
+          find /tmp/bdb-src -type f \( \
+            -name '*.h' -o \
+            -name '*.c' -o \
+            -name '*.cc' -o \
+            -name '*.cpp' \
+          \) -print0 | xargs -0 perl -pi -e '
+            s/\b__atomic_compare_exchange\b/__db_atomic_compare_exchange/g;
+            s/\batomic_init\s*\(/db_atomic_init(/g;
+          '
+
+          if grep -R "^[[:space:]]*#define[[:space:]]\+atomic_init" /tmp/bdb-src; then
+            echo "ERROR: Berkeley DB atomic_init macro survived patch"
+            exit 1
+          fi
           cd /tmp/bdb-src/build_unix
           arch -x86_64 env CFLAGS="-O2 -fPIC" \
             ../dist/configure \

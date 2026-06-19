@@ -218,6 +218,28 @@ Fix pattern in `codemagic.yaml`:
 
 Do not respond to this failure by disabling wallet support; the macOS artifacts are intended to ship wallet-enabled binaries.
 
+### 8. Berkeley DB 4.8 atomic macros collided with modern Apple libc++
+
+Symptom:
+
+```text
+/Applications/Xcode.app/.../include/c++/v1/atomic:...: error: expected unqualified-id
+#define atomic_init(p, val) ((p)->value = (val))
+```
+
+Important subtlety:
+
+- Berkeley DB 4.8 predates modern Apple Clang/libc++ and defines legacy atomic helper names in the global macro namespace.
+- The workflow already renamed `__atomic_compare_exchange`, but Xcode 26 also trips over BDB's `atomic_init(...)` macro because libc++ declares a real `atomic_init` in `<atomic>`.
+- Patch the downloaded BDB source before configuring or compiling it. Do not patch Interchained C++ sources to route around this vendor macro.
+
+Fix pattern in `codemagic.yaml`:
+
+- After cloning `/tmp/bdb-src`, run a source-wide Perl rewrite across BDB headers and C/C++ sources.
+- Rename `__atomic_compare_exchange` to `__db_atomic_compare_exchange`.
+- Rename every `atomic_init(` call/macro to `db_atomic_init(`.
+- Fail early if a `#define atomic_init` line survives under `/tmp/bdb-src`.
+
 ## Current portable glibc link strategy
 
 The working strategy is layered:
@@ -262,6 +284,7 @@ This is intentionally CI-scoped because the portable packaging workflow is the p
 | `undefined reference to nedb_get(NedbHandle*, ...)` | C++ mangled caller reference | `nedb-ffi/build.rs` cbindgen `with_cpp_compat(true)` |
 | `libnedb_ffi.a(...): undefined reference to dlsym` | Rust archive is linked, but native syslib missing | Rust syslibs in final link group |
 | `libdb_cxx headers missing` with `-I.../db4/include` present | BDB install prefix lacks `db_cxx.h` | `codemagic.yaml` BDB header staging/checks |
+| `#define atomic_init(p, val)` near libc++ `<atomic>` errors | BDB legacy atomic macro collided with Apple libc++ | `codemagic.yaml` BDB source rewrite before configure |
 | `no nedb_* T symbols` | Rust archive did not export expected FFI | `nedb-ffi/src/lib.rs`, Rust build flags, LTO/bitcode checks |
 | LLVM bitcode magic in extracted objects | Rust archive unusable by GNU ld path | `lto=false`, `RUSTFLAGS=-C embed-bitcode=no` |
 
