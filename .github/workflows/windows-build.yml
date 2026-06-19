@@ -1,11 +1,10 @@
 name: Windows Build (MinGW64)
 
 # Builds interchainedd.exe on Windows via MSYS2 MinGW64.
-# Mirrors the macOS x86_64 Codemagic workflow:
-#   - BDB 4.8 from source
-#   - NEDB FFI Rust staticlib (x86_64-pc-windows-gnu)
-#   - Boost from MSYS2 (1.85 compat fixes already in source)
-#   - No ZMQ / no miniupnpc for first-pass build
+# BDB comes from the MSYS2 package (mingw-w64-x86_64-db) — no from-source
+# build needed; the MSYS2 package ships Windows-patched headers and static
+# libs at /mingw64/{include,lib}.  --with-incompatible-bdb handles the
+# version mismatch vs 4.8.
 
 on:
   push:
@@ -52,7 +51,17 @@ jobs:
             mingw-w64-x86_64-miniupnpc
             mingw-w64-x86_64-openssl
             mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-db
             perl
+
+      - name: Verify BDB from MSYS2
+        run: |
+          echo "=== BDB headers ==="
+          ls -lah /mingw64/include/db*.h
+          echo "=== BDB libs ==="
+          ls -lah /mingw64/lib/libdb*.a /mingw64/lib/libdb*.dll.a 2>/dev/null || true
+          echo "=== BDB version ==="
+          grep DB_VERSION_STRING /mingw64/include/db.h | head -3
 
       - name: Install Rust stable + x86_64-pc-windows-gnu target
         shell: pwsh
@@ -68,7 +77,6 @@ jobs:
 
       - name: Build NEDB FFI (x86_64-pc-windows-gnu)
         run: |
-          # cygpath converts C:\Users\... to /c/Users/... for MSYS2
           export PATH="$(cygpath "$USERPROFILE")/.cargo/bin:$PATH"
           sed -i 's/^lto[[:space:]]*=.*/lto = false/' nedb-ffi/Cargo.toml
           cd nedb-ffi
@@ -104,51 +112,18 @@ jobs:
           echo "Staged: $NEDB_NATIVE_DIR/libnedb_ffi.la"
           cat "$NEDB_NATIVE_DIR/libnedb_ffi.la"
 
-      - name: Build Berkeley DB 4.8 from source
-        run: |
-          set -euo pipefail
-          J=$(nproc || echo 4)
-          BDB_PREFIX="$GITHUB_WORKSPACE/db4"
-          mkdir -p "$BDB_PREFIX"
-
-          git clone --depth=1 https://github.com/observerdev/db-4.8.30.git /tmp/bdb-src
-
-          # Patch for modern compiler atomics
-          find /tmp/bdb-src -type f \( \
-            -name '*.h' -o -name '*.c' -o -name '*.cc' -o -name '*.cpp' \
-          \) -print0 | xargs -0 perl -pi -e \
-            's/\b__atomic_compare_exchange\b/__db_atomic_compare_exchange/g;
-             s/\batomic_init\s*\(/db_atomic_init(/g;'
-
-          cd /tmp/bdb-src/build_unix
-          ../dist/configure \
-            --prefix="$BDB_PREFIX" \
-            --enable-cxx \
-            --disable-shared \
-            --with-pic \
-            || { cat config.log; exit 1; }
-          make -j"$J"
-          make install
-
-          [ -f "$BDB_PREFIX/lib/libdb_cxx.a" ] && \
-            ln -sf "$BDB_PREFIX/lib/libdb_cxx.a" "$BDB_PREFIX/lib/libdb_cxx-4.8.a" || true
-          [ -f "$BDB_PREFIX/lib/libdb.a" ] && \
-            ln -sf "$BDB_PREFIX/lib/libdb.a" "$BDB_PREFIX/lib/libdb-4.8.a" || true
-
-          echo "BDB staged:"
-          ls -lah "$BDB_PREFIX/include/db"*.h 2>/dev/null || true
-          ls -lah "$BDB_PREFIX/lib/libdb"*.a  2>/dev/null || true
-
       - name: Configure & Build interchainedd.exe
         run: |
           export PATH="$(cygpath "$USERPROFILE")/.cargo/bin:$PATH"
           J=$(nproc || echo 4)
-          BDB_PREFIX="$GITHUB_WORKSPACE/db4"
+
+          # Use BDB from MSYS2 package — headers and static libs at /mingw64
+          BDB_PREFIX="/mingw64"
 
           ./autogen.sh
 
-          BDB_CFLAGS="-I$BDB_PREFIX/include" \
-          BDB_LIBS="$BDB_PREFIX/lib/libdb_cxx-4.8.a $BDB_PREFIX/lib/libdb-4.8.a -pthread" \
+          BDB_CFLAGS="-I${BDB_PREFIX}/include" \
+          BDB_LIBS="-L${BDB_PREFIX}/lib -ldb_cxx -ldb" \
           ./configure \
             --enable-wallet \
             --with-incompatible-bdb \
@@ -171,7 +146,7 @@ jobs:
         run: |
           REF="${GITHUB_REF_NAME:-${GITHUB_SHA:0:8}}"
           mkdir -p out
-          cp src/interchainedd.exe   out/ 2>/dev/null || true
+          cp src/interchainedd.exe    out/ 2>/dev/null || true
           cp src/interchained-cli.exe out/ 2>/dev/null || true
           [ -f README.md ] && cp README.md out/ || true
           sha256sum out/* > out/SHA256SUMS
