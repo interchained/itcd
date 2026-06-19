@@ -54,18 +54,22 @@ jobs:
             mingw-w64-x86_64-zlib
             perl
 
-      - name: Add x86_64-pc-windows-gnu Rust target
-        # windows-latest already has Rust stable — just add the MinGW target
+      - name: Install Rust stable + x86_64-pc-windows-gnu target
         shell: pwsh
         run: |
-          rustup default stable
+          # Install rustup + stable toolchain (idempotent)
+          $env:RUSTUP_INIT_SKIP_PATH_CHECK = "yes"
+          Invoke-WebRequest "https://win.rustup.rs/x86_64" -OutFile "$env:TEMP\rustup-init.exe"
+          & "$env:TEMP\rustup-init.exe" -y --default-toolchain stable --profile minimal 2>&1
+          $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
           rustup target add x86_64-pc-windows-gnu
-          Write-Host "Rust $(rustc --version)"
-          Write-Host "Targets: $(rustup target list --installed)"
+          Write-Host "Rust: $(rustc --version)"
+          Write-Host "Cargo: $(cargo --version)"
 
       - name: Build NEDB FFI (x86_64-pc-windows-gnu)
         run: |
-          export PATH="$USERPROFILE/.cargo/bin:$PATH"
+          # cygpath converts C:\Users\... to /c/Users/... for MSYS2
+          export PATH="$(cygpath "$USERPROFILE")/.cargo/bin:$PATH"
           sed -i 's/^lto[[:space:]]*=.*/lto = false/' nedb-ffi/Cargo.toml
           cd nedb-ffi
           RUSTFLAGS="-C embed-bitcode=no" \
@@ -136,7 +140,7 @@ jobs:
 
       - name: Configure & Build interchainedd.exe
         run: |
-          export PATH="$USERPROFILE/.cargo/bin:$PATH"
+          export PATH="$(cygpath "$USERPROFILE")/.cargo/bin:$PATH"
           J=$(nproc || echo 4)
           BDB_PREFIX="$GITHUB_WORKSPACE/db4"
 
