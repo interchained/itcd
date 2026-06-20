@@ -434,79 +434,55 @@ pub extern "C" fn nedb_scan(
 
     #[cfg(feature = "phase2")]
     {
-        use rayon::prelude::*;
         use std::fs;
-
         let h = unsafe { &*handle };
-
-        // ── Step 1: collect ID index file paths (pure directory listing, no I/O) ──
-        // Layout: {db_path}/indexes/{coll}/id/{2-hex-shard}/{hex_encoded_key}
-        // Each shard dir holds files whose names ARE the hex-encoded binary keys.
+        // Sequential file walk — optimal for rotational disk (HDD/Fusion Drive).
+        // Progress fires immediately per entry: real-time counter on all storage types.
         let index_root = h.path.join("indexes").join(&h.coll).join("id");
-        let mut id_files: Vec<std::path::PathBuf> = Vec::new();
-
+        // Count entries first (directory stat, no file reads) for progress denominator.
+        let mut total: u64 = 0;
         if let Ok(shards) = fs::read_dir(&index_root) {
             for shard in shards.flatten() {
                 if shard.path().is_dir() {
                     if let Ok(files) = fs::read_dir(shard.path()) {
-                        for f in files.flatten() {
-                            id_files.push(f.path());
+                        total += files.count() as u64;
+                    }
+                }
+            }
+        }
+        if total == 0 { return 0; }
+        // Sequential read + immediate callback per entry.
+        let mut progress: u64 = 0;
+        if let Ok(shards) = fs::read_dir(&index_root) {
+            for shard in shards.flatten() {
+                if !shard.path().is_dir() { continue; }
+                if let Ok(files) = fs::read_dir(shard.path()) {
+                    for id_file in files.flatten() {
+                        let path = id_file.path();
+                        let hex_key = match path.file_name().and_then(|n| n.to_str()) {
+                            Some(s) => s.to_string(), None => continue,
+                        };
+                        let k = match hex::decode(&hex_key) { Ok(b) => b, Err(_) => continue };
+                        let hash_hex = match fs::read_to_string(&path) { Ok(s) => s, Err(_) => continue };
+                        let hash_hex = hash_hex.trim();
+                        if hash_hex.len() < 4 { continue; }
+                        let obj_path = h.path.join("objects").join(&hash_hex[..2]).join(&hash_hex[2..]);
+                        let obj_bytes = match fs::read(&obj_path) { Ok(b) => b, Err(_) => continue };
+                        let node: serde_json::Value = match serde_json::from_slice(&obj_bytes) {
+                            Ok(v) => v, Err(_) => continue
+                        };
+                        let v = match hex::decode(node["data"]["v"].as_str().unwrap_or("")) {
+                            Ok(b) => b, Err(_) => continue
+                        };
+                        progress += 1;
+                        unsafe {
+                            callback(k.as_ptr(), k.len(), v.as_ptr(), v.len(), progress, total, ctx);
                         }
                     }
                 }
             }
         }
-
-        let total = id_files.len() as u64;
-        if total == 0 { return 0; }
-
-        // ── Step 2: parallel read with rayon ────────────────────────────────────
-        // For each ID index file:
-        //   filename  = hex-encoded binary key
-        //   contents  = BLAKE2b hash that locates the object file
-        // Object file: {db_path}/objects/{hash[..2]}/{hash[2..]}
-        //   contents  = JSON {"data":{"v":"<hex value>"},...}
-        //
-        // rayon processes all files concurrently → SSD IOPS fully utilized.
-        let db_path_clone = h.path.clone();
-        let mut entries: Vec<(Vec<u8>, Vec<u8>)> = id_files
-            .par_iter()
-            .filter_map(|id_file| -> Option<(Vec<u8>, Vec<u8>)> {
-                // key ← filename (hex-encoded binary key)
-                let hex_key = id_file.file_name()?.to_str()?;
-                let k = hex::decode(hex_key).ok()?;
-
-                // hash ← file contents (points to object file)
-                let hash_hex = fs::read_to_string(id_file).ok()?;
-                let hash_hex = hash_hex.trim();
-                if hash_hex.len() < 4 { return None; }
-
-                // value ← object file → JSON → data["v"] (hex)
-                let obj_path = db_path_clone.join("objects")
-                    .join(&hash_hex[..2])
-                    .join(&hash_hex[2..]);
-                let obj_bytes = fs::read(&obj_path).ok()?;
-                let node: serde_json::Value = serde_json::from_slice(&obj_bytes).ok()?;
-                let v_hex = node["data"]["v"].as_str().unwrap_or("");
-                let v = hex::decode(v_hex).ok()?;
-
-                Some((k, v))
-            })
-            .collect();
-
-        // ── Step 3: sequential callback delivery with running progress ───────────
-        let delivered = entries.len() as u64;
-        for (progress, (k, v)) in entries.iter().enumerate() {
-            unsafe {
-                callback(
-                    k.as_ptr(), k.len(),
-                    v.as_ptr(), v.len(),
-                    (progress + 1) as u64, delivered,
-                    ctx,
-                );
-            }
-        }
-        delivered
+        progress
     }
 }
 
