@@ -494,10 +494,6 @@ pub extern "C" fn nedb_scan(
             })
             .collect();
 
-        // Sort by key so the C++ iterator-seek logic sees lexicographic order
-        // (matches the behaviour of the previous nedb_iter-based approach).
-        entries.par_sort_unstable_by(|a, b| a.0.cmp(&b.0));
-
         // ── Step 3: sequential callback delivery with running progress ───────────
         let delivered = entries.len() as u64;
         for (progress, (k, v)) in entries.iter().enumerate() {
