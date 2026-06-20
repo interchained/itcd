@@ -1,12 +1,6 @@
 name: Linux Build (portable glibc) — wallet + miniupnpc + zmq
 
 on:
-  push:
-    branches:
-      - "**"
-    tags:
-      - "v*"
-      - "release-*"
   workflow_dispatch:
 
 permissions:
