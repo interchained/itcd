@@ -18,6 +18,8 @@ workflows:
           include: true
 
     environment:
+      groups:
+        - itcd_signing        # CM_CERTIFICATE + CM_CERTIFICATE_PASSWORD
       vars:
         ARTIFACT_DIR: out
 
@@ -126,6 +128,55 @@ workflows:
           make -j"$J"
           test -f src/interchainedd && file src/interchainedd
 
+      - name: Sign & Notarize interchainedd arm64 (Developer ID — Interchained LLC)
+        script: |
+          if [ -z "${CM_CERTIFICATE:-}" ]; then
+            echo "⚠️  CM_CERTIFICATE not set — skipping signing"
+            exit 0
+          fi
+          echo "$CM_CERTIFICATE" | base64 --decode > /tmp/developer_id.p12
+          security create-keychain -p "" build.keychain 2>/dev/null || true
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import /tmp/developer_id.p12 \
+            -k build.keychain \
+            -P "${CM_CERTIFICATE_PASSWORD:-}" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+          rm -f /tmp/developer_id.p12
+
+          SIGN_ID=$(security find-identity -v -p codesigning build.keychain \
+            | grep "Developer ID Application" | head -1 | awk '{print $2}')
+          if [ -z "$SIGN_ID" ]; then
+            echo "⚠️  No Developer ID Application cert found after import — skipping"
+            exit 0
+          fi
+          echo "Signing with: $SIGN_ID"
+
+          codesign --sign "$SIGN_ID" \
+                   --options runtime \
+                   --timestamp \
+                   --force \
+                   src/interchainedd src/interchained-cli
+          codesign --verify --verbose src/interchainedd
+          spctl --assess --type exec --verbose src/interchainedd 2>&1 || true
+
+          if [ -n "${APP_STORE_CONNECT_PRIVATE_KEY:-}" ]; then
+            echo "$APP_STORE_CONNECT_PRIVATE_KEY" > /tmp/asc_key.p8
+            zip -j /tmp/interchainedd_notarize.zip src/interchainedd
+            xcrun notarytool submit /tmp/interchainedd_notarize.zip \
+              --key /tmp/asc_key.p8 \
+              --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
+              --issuer "$APP_STORE_CONNECT_ISSUER_ID" \
+              --wait
+            xcrun stapler staple src/interchainedd
+            rm -f /tmp/asc_key.p8 /tmp/interchainedd_notarize.zip
+            echo "✅ Notarized and stapled"
+          else
+            echo "ℹ️  Notarization skipped (APP_STORE_CONNECT_PRIVATE_KEY not set)"
+          fi
+
       - name: Package arm64 binary
         script: |
           J_TAG="${FCI_TAG:-${CM_COMMIT:0:8}}"
@@ -161,6 +212,8 @@ workflows:
           include: true
 
     environment:
+      groups:
+        - itcd_signing        # CM_CERTIFICATE + CM_CERTIFICATE_PASSWORD
       vars:
         ARTIFACT_DIR: out
 
@@ -359,16 +412,31 @@ workflows:
 
       - name: Sign & Notarize interchainedd (Developer ID — Interchained LLC)
         script: |
-          # Discover the Developer ID Application cert from Elara's keychain entry
-          SIGN_ID=$(security find-identity -v -p codesigning \
+          # Import Developer ID cert from CM_CERTIFICATE env var (itcd_signing group)
+          if [ -z "${CM_CERTIFICATE:-}" ]; then
+            echo "⚠️  CM_CERTIFICATE not set — skipping signing"
+            exit 0
+          fi
+          echo "$CM_CERTIFICATE" | base64 --decode > /tmp/developer_id.p12
+          security create-keychain -p "" build.keychain 2>/dev/null || true
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import /tmp/developer_id.p12 \
+            -k build.keychain \
+            -P "${CM_CERTIFICATE_PASSWORD:-}" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+          rm -f /tmp/developer_id.p12
+
+          SIGN_ID=$(security find-identity -v -p codesigning build.keychain \
             | grep "Developer ID Application" | head -1 | awk '{print $2}')
           if [ -z "$SIGN_ID" ]; then
-            echo "⚠️  No Developer ID Application cert found — skipping signing"
+            echo "⚠️  No Developer ID Application cert found after import — skipping"
             exit 0
           fi
           echo "Signing with: $SIGN_ID"
 
-          # Sign both binaries — --options runtime required for notarization
           codesign --sign "$SIGN_ID" \
                    --options runtime \
                    --timestamp \
@@ -377,7 +445,7 @@ workflows:
           codesign --verify --verbose src/interchainedd
           spctl --assess --type exec --verbose src/interchainedd 2>&1 || true
 
-          # Notarize via App Store Connect API key (same key Elara uses)
+          # Notarize via App Store Connect API key
           if [ -n "${APP_STORE_CONNECT_PRIVATE_KEY:-}" ]; then
             echo "$APP_STORE_CONNECT_PRIVATE_KEY" > /tmp/asc_key.p8
             zip -j /tmp/interchainedd_notarize.zip src/interchainedd
@@ -390,7 +458,7 @@ workflows:
             rm -f /tmp/asc_key.p8 /tmp/interchainedd_notarize.zip
             echo "✅ Notarized and stapled"
           else
-            echo "ℹ️  APP_STORE_CONNECT_PRIVATE_KEY not set — skipping notarization"
+            echo "ℹ️  Notarization skipped (APP_STORE_CONNECT_PRIVATE_KEY not set)"
           fi
 
       - name: Package x86_64 binary (for iMac Intel)
