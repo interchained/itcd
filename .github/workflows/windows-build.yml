@@ -47,6 +47,7 @@ jobs:
             mingw-w64-x86_64-boost
             mingw-w64-x86_64-libevent
             mingw-w64-x86_64-sqlite3
+            mingw-w64-x86_64-zeromq
             mingw-w64-x86_64-miniupnpc
             mingw-w64-x86_64-openssl
             mingw-w64-x86_64-zlib
@@ -167,7 +168,9 @@ jobs:
           # stubs (GetLastError, CloseHandle, WaitOnAddress, etc.) that Rust's
           # staticlib bundles alongside MinGW's own stubs.
           NEDB_LIB="$(pwd)/nedb-ffi/target/release/libnedb_ffi.a"
-          echo "LIBS += -Wl,--allow-multiple-definition -Wl,--whole-archive,${NEDB_LIB},--no-whole-archive -lws2_32 -lbcrypt -lntdll -luserenv" \
+          # -lsodium: required by libzmq (MSYS2 zeromq built with CURVE/libsodium)
+          # -luserenv: required by Rust std (GetUserProfileDirectoryW)
+          echo "LIBS += -Wl,--allow-multiple-definition -Wl,--whole-archive,${NEDB_LIB},--no-whole-archive -lws2_32 -lbcrypt -lntdll -luserenv -lsodium" \
             >> src/Makefile
 
           make -j"$J"
