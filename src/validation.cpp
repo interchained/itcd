@@ -3301,7 +3301,8 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block)
     pindexNew->RaiseValidity(BLOCK_VALID_TREE);
     if (pindexBestHeader == nullptr || pindexBestHeader->nChainWork < pindexNew->nChainWork) {
         pindexBestHeader = pindexNew;
-        // Persist tip chain work so warm restarts can skip the O(N) recalculation.
+        // Persist tip hash + chain work so warm restarts can boot in O(2016) reads.
+        pblocktree->WriteTipHash(pindexNew->GetBlockHash());
         pblocktree->WriteTipChainWork(pindexNew->nChainWork);
     }
 
@@ -4250,9 +4251,39 @@ bool BlockManager::LoadBlockIndex(
     CBlockTreeDB& blocktree,
     std::set<CBlockIndex*, CBlockIndexWorkComparator>& block_index_candidates)
 {
+    // ── Warm-boot fast path ────────────────────────────────────────────────────
+    // On a warm restart the last tip hash and chain work are persisted in NEDB.
+    // Reading only the last 2016 block headers (one NEDB lookup each) takes
+    // seconds rather than hours compared to scanning the full chain.
+    {
+        uint256 tip_hash;
+        arith_uint256 tip_chainwork;
+        if (blocktree.ReadTipHash(tip_hash) &&
+            blocktree.ReadTipChainWork(tip_chainwork) &&
+            !tip_hash.IsNull())
+        {
+            LogPrintf("LoadBlockIndex: warm boot from tip %s\n",
+                      tip_hash.GetHex().substr(0, 16));
+            auto insertFn = [this](const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+                return this->InsertBlockIndex(hash);
+            };
+            if (blocktree.LoadBlockIndexFromTip(tip_hash, 2016, insertFn)) {
+                // Set cached chain work on the tip block so chain selection works.
+                CBlockIndex* ptip = InsertBlockIndex(tip_hash);
+                if (ptip) ptip->nChainWork = tip_chainwork;
+                LogPrintf("LoadBlockIndex: warm boot complete — skipped full scan.\n");
+                goto post_load_index;
+            }
+            LogPrintf("LoadBlockIndex: warm boot fallback to full scan.\n");
+            m_block_index.clear();   // discard partial state before full scan
+        }
+    }
+
+    // ── Full scan (first run, reindex, or warm-boot miss) ─────────────────────
     if (!blocktree.LoadBlockIndexGuts(consensus_params, [this](const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main) { return this->InsertBlockIndex(hash); }))
         return false;
 
+    post_load_index:
     LogPrintf("LoadBlockIndex: building chain state from %u headers...\n",
               m_block_index.size());
 
