@@ -279,31 +279,31 @@ bool CBlockTreeDB::LoadBlockIndexGuts(const Consensus::Params& consensusParams, 
                 dummyHeader.nVersion = pindexNew->nVersion;
                 dummyHeader.nNonce = pindexNew->nNonce;
                                 
-                // Pick the hash the PoW check expects for this height:
-                //   - Pre-reactivation Yespower blocks  → Yespower hash
-                //   - Post-reactivation blocks          → SHA256 hash
-                //     (CheckProofOfWork's dual-PoW path checks SHA256 first
-                //     and re-hashes internally for the Yespower fallback)
-                //   - Genesis                            → SHA256 hash
-                uint256 powHash;
-                if (pindexNew->nHeight >= consensusParams.sha256ReactivationHeight) {
-                    powHash = pindexNew->GetBlockHash();
-                } else if (pindexNew->nHeight >= 1) {
-                    powHash = dummyHeader.YespowerHash(pindexNew->nHeight);
-                } else {
-                    powHash = pindexNew->GetBlockHash();
-                }
-                // During index load, pprev may be a freshly-inserted stub whose
-                // nTime hasn't been populated from disk yet (LevelDB iterates
-                // in hash order, not height order). Treat an unloaded stub
-                // (nTime == 0) the same as a missing prev: pass -1 sentinel
-                // for permissive emergency-arming, matching every other call
-                // site that lacks a real previous-block timestamp.
-                int64_t prevBlockTime = (pindexNew->pprev && pindexNew->pprev->nTime != 0)
-                                          ? pindexNew->pprev->nTime
-                                          : -1;
-                if (!CheckProofOfWork(powHash, dummyHeader, pindexNew->nBits, consensusParams, pindexNew->nHeight, prevBlockTime)) {
-                    return error("%s: CheckProofOfWork failed: %s", __func__, pindexNew->ToString());
+                // Skip PoW recomputation for blocks already validated during IBD.
+                // BLOCK_VALID_TREE is the status set when difficulty, timestamp,
+                // and proof-of-work have been verified for a block. Any block in
+                // our local store at or above this level was already proven valid —
+                // re-hashing every block on every restart is redundant and
+                // expensive (YespowerHash is memory-hard by design, ~7-10ms/block,
+                // which adds up to 45-90 minutes at 350k blocks on a cold disk).
+                // Only verify PoW for blocks not yet validated to TREE level
+                // (orphan stubs or partially-processed blocks from interrupted IBD).
+                // The chain tip's PoW is verified separately after the full load.
+                if ((pindexNew->nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TREE) {
+                    uint256 powHash;
+                    if (pindexNew->nHeight >= consensusParams.sha256ReactivationHeight) {
+                        powHash = pindexNew->GetBlockHash();
+                    } else if (pindexNew->nHeight >= 1) {
+                        powHash = dummyHeader.YespowerHash(pindexNew->nHeight);
+                    } else {
+                        powHash = pindexNew->GetBlockHash();
+                    }
+                    int64_t prevBlockTime = (pindexNew->pprev && pindexNew->pprev->nTime != 0)
+                                              ? pindexNew->pprev->nTime
+                                              : -1;
+                    if (!CheckProofOfWork(powHash, dummyHeader, pindexNew->nBits, consensusParams, pindexNew->nHeight, prevBlockTime)) {
+                        return error("%s: CheckProofOfWork failed: %s", __func__, pindexNew->ToString());
+                    }
                 }
                 pcursor->Next();
             } else {
