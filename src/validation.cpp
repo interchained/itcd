@@ -4401,6 +4401,24 @@ bool BlockManager::LoadBlockIndex(
         }
     }
 
+    // ── Warm-boot nChainWork correction ───────────────────────────────────────
+    // The chain-work loop computed nChainWork from the boundary block (0+proof)
+    // not from genesis. tip->nChainWork ended up as ~2016 proofs instead of the
+    // real 600k+ cumulative value. PruneBlockIndexCandidates erases all candidates
+    // whose chainwork < m_chain.Tip()->nChainWork — which is everything — assert.
+    // Fix: add offset (persisted_real - loop_computed) to every warm-boot block.
+    if (warm_ptip != nullptr) {
+        arith_uint256 computed_tip_work = warm_ptip->nChainWork;
+        if (warm_tip_chainwork > computed_tip_work) {
+            arith_uint256 offset = warm_tip_chainwork - computed_tip_work;
+            for (auto& item : m_block_index) {
+                item.second->nChainWork += offset;
+            }
+            LogPrintf("LoadBlockIndex: warm boot nChainWork corrected (+%s).\n",
+                      offset.GetHex().substr(0, 16));
+        }
+    }
+
     return true;
 }
 
