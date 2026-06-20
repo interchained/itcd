@@ -141,6 +141,36 @@ char *nedb_head(NedbHandle *handle);
 /** Free a C string returned by any nedb_* function. */
 void nedb_free_str(char *s);
 
+/* ---- Bulk scan ------------------------------------------------------- */
+
+/**
+ * Callback invoked once per entry during nedb_scan().
+ *
+ * @key / @key_len      Raw binary key (same bytes as stored by nedb_put/batch).
+ * @val / @val_len      Raw binary value.
+ * @progress            1-based count of entries delivered so far.
+ * @total               Total entry count for this scan (0 = unknown).
+ * @ctx                 Caller-supplied context pointer.
+ *
+ * key/val pointers are only valid for the duration of the callback.
+ * Do NOT call nedb_free_value() on them.
+ */
+typedef void (*NedbScanFn)(const unsigned char *key, size_t key_len,
+                           const unsigned char *val, size_t val_len,
+                           uint64_t progress, uint64_t total,
+                           void *ctx);
+
+/**
+ * Scan all entries in the database, invoking @callback for each one.
+ *
+ * Replaces the iterator pattern for bulk loads (e.g. block-index startup).
+ * Provides a progress counter so callers can log without waiting for the
+ * entire scan to complete before seeing the first entry.
+ *
+ * Returns the total number of entries scanned, or 0 on error.
+ */
+uint64_t nedb_scan(NedbHandle *handle, NedbScanFn callback, void *ctx);
+
 /* ---- Iterator ------------------------------------------------------- */
 
 /**
