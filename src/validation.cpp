@@ -142,7 +142,10 @@ bool g_parallel_script_checks{false};
 std::atomic_bool fImporting(false);
 std::atomic_bool fReindex(false);
 uint256           g_warm_boot_tip_hash;        // written once by TryWarmBoot, read by net_processing
-std::atomic<bool> g_warm_boot_verified{false}; // set when peer seam-check passes
+uint256           g_warm_boot_base_hash;        // oldest header in the loaded window (Proof-of-Prefix base)
+int               g_warm_boot_tip_height{0};    // height of the warm-boot tip
+std::atomic<bool> g_warm_boot_verified{false}; // set when the canonical-chain seam closes
+std::atomic<bool> g_warm_boot_mismatch{false}; // set if the canonical chain provably disagrees with our tip
 bool fHavePruned = false;
 bool fPruneMode = false;
 bool fRequireStandard = true;
@@ -4452,6 +4455,10 @@ bool CChainState::TryWarmBoot(CBlockTreeDB& blocktree,
 {
     AssertLockHeld(cs_main);
 
+    // Fresh Proof-of-Prefix state for this attempt.
+    g_warm_boot_verified.store(false);
+    g_warm_boot_mismatch.store(false);
+
     // Read the persisted tip hash and cumulative chain work.
     uint256      tip_hash;
     arith_uint256 tip_chainwork;
@@ -4585,12 +4592,28 @@ bool CChainState::TryWarmBoot(CBlockTreeDB& blocktree,
         }
     }
 
-    // Record the tip hash so ProcessHeadersMessage can verify the seam when the
-    // first peer sends headers that should continue from exactly this block.
-    g_warm_boot_tip_hash = tip_hash;
+    // Record the tip hash + height so ProcessHeadersMessage can close the
+    // Proof-of-Prefix seam when a peer's canonical chain is shown to contain it.
+    g_warm_boot_tip_hash   = tip_hash;
+    g_warm_boot_tip_height = ptip->nHeight;
 
-    LogPrintf("TryWarmBoot: loaded %u headers. Tip height %d chainwork %s. Awaiting peer seam-check.\n",
-              (unsigned)m_blockman.m_block_index.size(), ptip->nHeight,
+    // Record the bottom of the loaded window (oldest real header). verify()
+    // already proved base..tip is an intact BLAKE2b-linked chain locally, so
+    // this is the Proof-of-Prefix base checkpoint: confirm the tip is canonical
+    // and the whole window below it follows by construction.
+    CBlockIndex* pbase = ptip;
+    for (const std::pair<const uint256, CBlockIndex*>& item : m_blockman.m_block_index) {
+        CBlockIndex* pidx = item.second;
+        if (pidx && pidx->nStatus != 0 && pidx->nHeight < pbase->nHeight)
+            pbase = pidx;
+    }
+    g_warm_boot_base_hash = pbase ? pbase->GetBlockHash() : uint256();
+    const int base_height = pbase ? pbase->nHeight : 0;
+
+    LogPrintf("TryWarmBoot: loaded %u headers. Window [%s @ %d .. %s @ %d] chainwork %s. NEDB-intact; awaiting canonical-chain seam from the seed anchor.\n",
+              (unsigned)m_blockman.m_block_index.size(),
+              g_warm_boot_base_hash.GetHex().substr(0, 12), base_height,
+              tip_hash.GetHex().substr(0, 12), ptip->nHeight,
               tip_chainwork.GetHex().substr(0, 16));
     return true;
 }

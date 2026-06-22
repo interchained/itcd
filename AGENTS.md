@@ -16,6 +16,72 @@ Merged fix:
 - Passing workflow: `Linux Build (portable glibc) — wallet + miniupnpc + zmq`
 - Passing job: `glibc-portable • x86_64`
 
+## Warm boot — NEDB Proof-of-Prefix (read before touching startup / IBD / GetAncestor)
+
+This supersedes the earlier "2016-header window + passive any-peer seam" warm
+boot. Do not revert to the old passive seam or re-introduce a hard `assert` on
+ancestor walks.
+
+### The crash we fixed
+
+```
+WarmBootLoadParent: warm boot not active
+Assertion failed: pa == pb, file chain.cpp, line 177
+```
+
+`chain.cpp:177` was `LastCommonAncestor`. Root cause chain:
+1. Warm boot loads only a 2016-header window; the oldest loaded header's `pprev`
+   is an unpopulated stub (`txdb.cpp` `LoadBlockIndexFromTip`).
+2. `g_warm_boot_active` was cleared at startup (`init.cpp`, "IBD takes over")
+   **before** header sync walked below the window.
+3. During IBD, `FindNextBlocksToDownload` → `LastCommonAncestor` →
+   `CBlockIndex::GetAncestor` hit the stub's null `pprev`, called
+   `WarmBootLoadParent`, which returned false (warm boot inactive), so
+   `GetAncestor` returned `nullptr`.
+4. `LastCommonAncestor` assumed a fully linked index and asserted `pa == pb`.
+
+### The redesign (what the code does now)
+
+Node B (compiled today) trusts its NEDB-persisted tip only after a two-part proof:
+
+1. **Local integrity — NEDB native `verify()`.** `nedb-ffi` exposes
+   `nedb_verify()` → `Db::verify()`; `CDBWrapper::Verify()` wraps it. `init.cpp`
+   runs it at startup before warm boot. It walks the content-addressed objects
+   and confirms each still hashes to its address — the storage-layer equivalent
+   of replaying and re-hashing the chain, but native and near-instant. Problems
+   found → wipe index, resync from height 0.
+2. **Canonical proof — seam against the seed anchor (Node A).** On mainnet the
+   anchor `seed.interchained.org:17101` is pinned as a persistent added node.
+   `ProcessHeadersMessage` closes the seam the moment a peer's canonical chain
+   is shown to contain our tip (it extends our tip, or its range includes our
+   tip hash). Because `verify()` proved base..tip is an intact BLAKE2b-linked
+   chain, confirming the **tip** is canonical proves the whole prefix by the
+   back-links — we do not re-compare every block.
+
+`g_warm_boot_active` now stays true from a successful `TryWarmBoot` **until the
+seam verifies** (then it is cleared in `net_processing`). While active, the NEDB
+on-demand ancestor loader serves `GetAncestor` from the DAG. A scheduler
+**watchdog** (`init.cpp`, 2 min) records a durable `nedb_warmboot_unconfirmed`
+flag if the seam never closes; the next start full-scans from 0. Destructive
+fallback only happens at the controlled startup path, never live.
+
+`LastCommonAncestor` is now **null-safe**: a `nullptr` from `GetAncestor` means
+"ancestry not available yet", returned to callers (which guard it) instead of
+asserting. This is the durable fix — a partial in-memory index is normal with
+NEDB-backed storage and must never crash the node.
+
+### Do / Do not (warm boot)
+
+- Do keep `LastCommonAncestor` null-safe and keep the `FindNextBlocksToDownload`
+  null guard after the `LastCommonAncestor` call.
+- Do keep the FFI a small set of typed primitives. **Do not** expose NEDB's NQL
+  query language across the consensus FFI — querying lives at the nedbd HTTP
+  layer (Studio / explorer). A typed `nedb_block_by_height()` is the allowed
+  shape if the node ever needs height lookups internally.
+- Do not clear `g_warm_boot_active` at startup; clear it only on seam verify or
+  the watchdog.
+- Do not re-add `assert(pa == pb)` to `LastCommonAncestor`.
+
 ## What this repo is doing
 
 `itcd` replaces the Bitcoin-style LevelDB backend with NEDB through a Rust static library exposed over a C FFI:

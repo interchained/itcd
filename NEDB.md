@@ -168,4 +168,52 @@ The node becomes its own block explorer — no external service required.
 
 ---
 
+## Proof-of-Prefix Warm Boot
+
+A node compiled today (Node B) holds its chain in the NEDB causal DAG, not in a
+LevelDB blob it must replay. That changes startup from "scan and rebuild the
+block index" into a **cryptographic proof**:
+
+```
+Node A  — seed.interchained.org:17101, online since genesis (the canonical chain)
+Node B  — compiled today, has blocks 0..T persisted in NEDB
+```
+
+**Step 1 — Local integrity (instant, native).**
+`Db::verify()` (exposed as `nedb_verify()` → `CDBWrapper::Verify()`) walks the
+content-addressed objects and confirms each still hashes to its BLAKE2b address.
+This proves Node B's `base..T` window is an intact, untampered, hash-linked
+chain — without deserializing a single block or re-running a single script. If
+verification fails, Node B cannot trust its store: it wipes the index and
+resyncs from height 0.
+
+**Step 2 — Canonical seam (one comparison).**
+Node B pins Node A as a persistent peer and confirms A's canonical chain
+*contains* B's tip `T` — either A extends `T`, or A sends a range that includes
+`T`'s hash. Because Step 1 proved every block below `T` is fixed by the
+back-links, a single confirmation of the tip proves the **entire prefix**. No
+block-by-block comparison, no Bitcoin-Core skip-list ancestor walk.
+
+**Step 3 — Sync forward, or fall back to 0.**
+Seam closed → warm boot confirmed; IBD proceeds forward from `T`. Seam never
+closes within the watchdog deadline, or A serves a chain that does not contain
+`T` → B's tip is not canonical → full resync from height 0.
+
+```
+verify() intact  +  A's chain ∋ tip T   ⟹   B's chain 0..T == A's chain 0..T
+```
+
+This is what "the blockchain IS the NEDB causal DAG" buys at startup: integrity
+is a storage-layer property (`verify()`), and consensus membership collapses to
+a single tip check. The legacy assumption that the in-memory block index is
+always fully linked is gone — `LastCommonAncestor` and the ancestor walk treat a
+partial index (the rest still in the DAG) as normal, never as a fatal assert.
+
+> The consensus FFI deliberately stays a small set of typed primitives
+> (`get/put/del/batch/head/scan/verify`). NEDB's NQL query language is **not**
+> exposed across this seam — rich querying belongs at the nedbd HTTP layer that
+> NEDB Studio and the explorer already use.
+
+---
+
 *© Interchained LLC × Claude Sonnet 4.6*

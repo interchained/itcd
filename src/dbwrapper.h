@@ -365,6 +365,20 @@ public:
         nedb_free_str(head);
         return result;
     }
+
+    /** Verify NEDB chain integrity (native BLAKE2b tamper-evidence).
+     *
+     *  Returns the number of objects that failed verification: 0 means the
+     *  store is intact.  A negative value means the verify call itself failed
+     *  (e.g. null handle).  This is the instant integrity proof the node runs
+     *  at warm boot before trusting the NEDB-persisted tip — the storage
+     *  layer's answer to "does Node B's local chain still hold together?".
+     *  Native and near-instant: no block deserialization, no LevelDB-style
+     *  full reindex. */
+    int Verify() const
+    {
+        return nedb_verify(pdb);
+    }
 };
 
 #endif // BITCOIN_DBWRAPPER_H

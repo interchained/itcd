@@ -701,6 +701,12 @@ static void FindNextBlocksToDownload(NodeId nodeid, unsigned int count, std::vec
     // If the peer reorganized, our previous pindexLastCommonBlock may not be an ancestor
     // of its current tip anymore. Go back enough to fix that.
     state->pindexLastCommonBlock = LastCommonAncestor(state->pindexLastCommonBlock, state->pindexBestKnownBlock);
+    // LastCommonAncestor now returns nullptr when the peer's ancestry is not yet
+    // linked in memory (normal under NEDB warm boot: the common point can be
+    // below the verified window and not demand-loaded). Treat it as "ancestry
+    // not available yet" and revisit on the next pass — never dereference null.
+    if (state->pindexLastCommonBlock == nullptr)
+        return;
     if (state->pindexLastCommonBlock == state->pindexBestKnownBlock)
         return;
 
@@ -1795,31 +1801,47 @@ void PeerManager::ProcessHeadersMessage(CNode& pfrom, const std::vector<CBlockHe
         return;
     }
 
-    // ── Warm-boot seam check ─────────────────────────────────────────────────
-    // The warm-boot loaded 2016 blocks downward from our stored tip.  The first
-    // HEADERS message from any peer should continue upward from that same tip
-    // (hashPrevBlock of headers[0] == g_warm_boot_tip_hash).  This single hash
-    // comparison closes the 4032-block window: 2016 local + 2016 from the peer.
+    // ── NEDB Proof-of-Prefix seam check ──────────────────────────────────────
+    // Warm boot already trusted Node B's NEDB-persisted tip after the engine's
+    // native verify() proved the local window is an intact BLAKE2b-linked chain
+    // (base..tip). The remaining question is whether that tip is on the CANONICAL
+    // chain. The cryptographic shortcut: because every block below the tip is
+    // fixed by the back-links that verify() validated, it is enough to confirm a
+    // peer's canonical chain CONTAINS our exact tip. The seam closes the moment
+    // the seed anchor (Node A, online since genesis) — or any honest peer —
+    // either extends our tip (hashPrevBlock of headers[0] == our tip) or sends a
+    // range that includes our tip hash directly.
     //
-    // Only run once (g_warm_boot_verified flips to true and stays there).
-    // Only relevant when g_warm_boot_active — ignored on normal full-scan boots.
+    // Runs only while warm boot is active and unverified; ignored on full scans.
     if (g_warm_boot_active.load() && !g_warm_boot_verified.load() &&
         !g_warm_boot_tip_hash.IsNull())
     {
-        if (headers[0].hashPrevBlock == g_warm_boot_tip_hash) {
-            // Peer's first response to our GETHEADERS starts exactly at our stored
-            // tip — the 4032-block window is closed and the chain is verified.
+        bool seam_closed = (headers[0].hashPrevBlock == g_warm_boot_tip_hash);
+        if (!seam_closed) {
+            // The peer may have sent a range that already contains our tip on its
+            // chain (our tip is an ancestor of what it announced).
+            for (const CBlockHeader& h : headers) {
+                if (h.GetHash() == g_warm_boot_tip_hash) { seam_closed = true; break; }
+            }
+        }
+        if (seam_closed) {
             g_warm_boot_verified.store(true);
-            LogPrintf("WarmBoot: peer=%d seam VERIFIED — tip %s confirmed by network\n",
+            // Leave warm-boot mode: the tip is proven canonical. The NEDB
+            // on-demand ancestor loader and this seam check stand down; normal
+            // IBD proceeds forward from the tip. LastCommonAncestor is null-safe
+            // for any ancestry still unlinked, so this can no longer assert.
+            g_warm_boot_active.store(false);
+            LogPrintf("WarmBoot: Proof-of-Prefix VERIFIED by peer=%d — tip %s @ %d is on the canonical chain (window base %s). NEDB integrity + network seam confirmed; syncing forward.\n",
                       pfrom.GetId(),
-                      g_warm_boot_tip_hash.GetHex().substr(0, 16));
+                      g_warm_boot_tip_hash.GetHex().substr(0, 16),
+                      g_warm_boot_tip_height,
+                      g_warm_boot_base_hash.GetHex().substr(0, 16));
         } else {
-            // This HEADERS message does not start from our warm-boot tip.  This is
-            // normal during IBD: peers announce new blocks (at height 633k+) before
-            // our initial GETHEADERS response arrives.  Log but do NOT cancel warm
-            // boot — the on-demand ancestry loader handles any depth, and the seam
-            // verification will succeed when the GETHEADERS response arrives.
-            LogPrint(BCLog::NET, "WarmBoot: peer=%d headers not from our tip (got prev %s) — waiting for GETHEADERS response\n",
+            // Not yet confirmed. Normal during IBD: peers announce new blocks far
+            // above our tip before our GETHEADERS response arrives. Do NOT cancel
+            // warm boot — the seam closes when the anchor's response lands, and
+            // the watchdog falls back to a full resync from 0 if it never does.
+            LogPrint(BCLog::NET, "WarmBoot: peer=%d headers do not yet confirm our tip (got prev %s) — awaiting the seed anchor's GETHEADERS response\n",
                       pfrom.GetId(),
                       headers[0].hashPrevBlock.GetHex().substr(0, 16));
         }
