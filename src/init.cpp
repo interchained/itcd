@@ -755,6 +755,15 @@ static void ThreadImport(ChainstateManager& chainman, std::vector<fs::path> vImp
     // the chainman unique_ptrs since ABC requires us not to be holding cs_main, so retrieve
     // the relevant pointers before the ABC call.
     for (CChainState* chainstate : WITH_LOCK(::cs_main, return chainman.GetAll())) {
+        // In warm-boot mode, the best candidate is a header-only block whose
+        // raw block data has not arrived from peers yet. Calling ActivateBestChain
+        // would cause ReadBlockFromDisk to fail fatally.  Skip the startup scan —
+        // the IBD loop handles activation as block data arrives from peers.
+        if (g_warm_boot_active) {
+            LogPrintf("Warm boot active: skipping startup ActivateBestChain scan.\n");
+            g_warm_boot_active = false;   // clear flag; IBD takes over
+            continue;
+        }
         BlockValidationState state;
         if (!chainstate->ActivateBestChain(state, chainparams, nullptr)) {
             LogPrintf("Failed to connect best block (%s)\n", state.ToString());
@@ -1628,7 +1637,9 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                         warm_ok = chainman.ActiveChainstate().TryWarmBoot(
                             *pblocktree, chainparams.GetConsensus());
                     }
-                    if (!warm_ok) {
+                    if (warm_ok) {
+                        g_warm_boot_active = true;
+                    } else {
                         if (!chainman.LoadBlockIndex(chainparams)) {
                             if (ShutdownRequested()) break;
                             strLoadError = _("Error loading block database");
