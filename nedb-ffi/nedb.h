@@ -141,6 +141,24 @@ char *nedb_head(NedbHandle *handle);
 /** Free a C string returned by any nedb_* function. */
 void nedb_free_str(char *s);
 
+/* ---- Chain integrity verification ----------------------------------- */
+
+/**
+ * Verify the tamper-evidence of every object in the store (NEDB native).
+ *
+ * Walks the content-addressed objects and confirms each still hashes to its
+ * stored address. This is the storage-layer equivalent of replaying and
+ * re-hashing the whole chain, but native and near-instant — the integrity
+ * proof the ITC node runs at startup (NEDB Proof-of-Prefix warm boot) before
+ * trusting its persisted tip.
+ *
+ * Returns:
+ *    0  — intact (every object verified, zero problems).
+ *   >0  — number of objects that failed verification (tampered/corrupt).
+ *   -1  — error (null handle).
+ */
+int nedb_verify(NedbHandle *handle);
+
 /* ---- Bulk scan ------------------------------------------------------- */
 
 /**

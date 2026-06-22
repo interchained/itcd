@@ -388,6 +388,52 @@ pub extern "C" fn nedb_free_str(s: *mut c_char) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// C API — chain integrity verification (NEDB native tamper-evidence)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Verify the tamper-evidence of every object in the store.
+///
+/// This is NEDB's native integrity proof: it walks the content-addressed
+/// objects and confirms each one's stored bytes still hash to its address
+/// (BLAKE2b). It is the storage-layer equivalent of replaying and re-hashing
+/// the whole chain — but native and near-instant: no block deserialization,
+/// no script re-execution, no LevelDB-style full reindex.
+///
+/// The ITC node calls this at startup (NEDB Proof-of-Prefix warm boot) to
+/// confirm Node B's local chain is intact before trusting its persisted tip.
+/// If the local chain is corrupt the node falls back to a full resync from
+/// height 0.
+///
+/// We deliberately do NOT expose NEDB's NQL query language across this FFI:
+/// the FFI is the consensus storage seam and stays a small set of typed
+/// primitives. Rich querying lives at the nedbd HTTP layer (Studio / explorer).
+///
+/// Returns:
+///   0   — intact: every object verified, zero problems.
+///  >0   — the number of objects that failed verification (tampered/corrupt).
+///  -1   — error (null handle).
+#[no_mangle]
+pub extern "C" fn nedb_verify(handle: *mut NedbHandle) -> c_int {
+    if handle.is_null() { return -1; }
+
+    #[cfg(not(feature = "phase2"))]
+    {
+        // Phase 1 is an in-process BTreeMap with no persisted, content-addressed
+        // objects to re-hash — it is trivially intact while the process is live.
+        let _ = handle;
+        0
+    }
+
+    #[cfg(feature = "phase2")]
+    {
+        let h = unsafe { &*handle };
+        let (_checked, problems) = h.db.verify();
+        // 0 = intact; otherwise the count of objects that failed verification.
+        problems.len().min(i32::MAX as usize) as c_int
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
 // C API — bulk scan  (replaces iterator for startup block-index loading)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -716,6 +762,30 @@ mod tests {
         nedb_iter_free(iter);
         nedb_close(h);
         cleanup("t_iter");
+    }
+
+    /// NEDB Proof-of-Prefix step 1: a freshly written, untampered store must
+    /// verify clean (0 problems). This is the instant local-integrity gate the
+    /// ITC node runs at warm boot before trusting its persisted tip.
+    #[test]
+    fn test_verify_intact_store_reports_no_problems() {
+        let h = open("t_verify");
+        let k: &[u8] = b"block:0";
+        let v: &[u8] = b"genesis_payload";
+        nedb_put(h, k.as_ptr(), k.len(), v.as_ptr(), v.len());
+        let k2: &[u8] = b"block:1";
+        let v2: &[u8] = b"block_one_payload";
+        nedb_put(h, k2.as_ptr(), k2.len(), v2.as_ptr(), v2.len());
+        assert_eq!(nedb_verify(h), 0, "intact store must report zero integrity problems");
+        nedb_close(h);
+        cleanup("t_verify");
+    }
+
+    /// A null handle is an error, not a silent "intact" — callers must be able
+    /// to distinguish "verified clean" (0) from "could not verify" (-1).
+    #[test]
+    fn test_verify_null_handle_is_error() {
+        assert_eq!(nedb_verify(std::ptr::null_mut()), -1);
     }
 
     /// Phase 1 consensus property: two BTreeMap instances with identical writes

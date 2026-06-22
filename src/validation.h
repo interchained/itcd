@@ -117,19 +117,37 @@ extern std::condition_variable g_best_block_cv;
 extern uint256 g_best_block;
 extern std::atomic_bool fImporting;
 extern std::atomic_bool fReindex;
-/** Warm-boot peer-comparison state.
+/** NEDB Proof-of-Prefix warm-boot state.
+ *
+ * Node B (compiled today) warm-boots from its NEDB-persisted tip after the
+ * engine's native verify() proves the local chain is intact, then confirms the
+ * tip is on the canonical chain by a seam check against Node A (the seed
+ * anchor, online since genesis).  Match → sync forward.  Mismatch / unconfirmed
+ * → full resync from height 0.  Because verify() proves the local window is an
+ * intact BLAKE2b-linked chain, confirming a peer's canonical chain *contains*
+ * our tip is sufficient — every block below the tip is fixed by the back-links.
  *
  * g_warm_boot_tip_hash   — hash of the tip we warm-booted from (written once by
  *                          TryWarmBoot before any network threads start; safe to
  *                          read without a lock from net_processing).
- * g_warm_boot_verified   — set to true by ProcessHeadersMessage the moment a peer
- *                          sends headers whose hashPrevBlock == g_warm_boot_tip_hash,
- *                          confirming that the live network continues from our
- *                          locally-stored tip (the 2016-block seam check).
+ * g_warm_boot_base_hash  — hash of the oldest header in the loaded window
+ *                          (tip − window); the Proof-of-Prefix base checkpoint.
+ * g_warm_boot_tip_height — height of the warm-boot tip (for logging / seam).
+ * g_warm_boot_verified   — set true by ProcessHeadersMessage the moment a peer's
+ *                          canonical chain is shown to contain our tip (seam
+ *                          closed). Clears g_warm_boot_active.
+ * g_warm_boot_active     — true from a successful TryWarmBoot until the seam is
+ *                          verified (or the watchdog gives up); keeps the NEDB
+ *                          on-demand ancestor loader and the seam check live.
+ * g_warm_boot_mismatch   — set true if the canonical chain provably disagrees
+ *                          with our tip (reserved for active fork detection).
  */
 extern uint256           g_warm_boot_tip_hash;
+extern uint256           g_warm_boot_base_hash;
+extern int               g_warm_boot_tip_height;
 extern std::atomic<bool> g_warm_boot_verified;
 extern std::atomic<bool> g_warm_boot_active;
+extern std::atomic<bool> g_warm_boot_mismatch;
 /** Whether there are dedicated script-checking threads running.
  * False indicates all script checking is done on the main threadMessageHandler thread.
  */

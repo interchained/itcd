@@ -764,8 +764,12 @@ static void ThreadImport(ChainstateManager& chainman, std::vector<fs::path> vImp
         // would cause ReadBlockFromDisk to fail fatally.  Skip the startup scan —
         // the IBD loop handles activation as block data arrives from peers.
         if (g_warm_boot_active) {
-            LogPrintf("Warm boot active: skipping startup ActivateBestChain scan.\n");
-            g_warm_boot_active = false;   // clear flag; IBD takes over
+            LogPrintf("Warm boot active: skipping startup ActivateBestChain scan — awaiting NEDB Proof-of-Prefix seam verification from the seed anchor.\n");
+            // Do NOT clear g_warm_boot_active here. It must stay active so the
+            // NEDB on-demand ancestor loader keeps serving GetAncestor from the
+            // DAG during IBD, and so ProcessHeadersMessage runs the seam check.
+            // The flag is cleared the moment the seam verifies (net_processing),
+            // or by the verification watchdog if the tip proves non-canonical.
             continue;
         }
         BlockValidationState state;
@@ -1630,17 +1634,50 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                 // block file from disk.
                 // Note that it also sets fReindex based on the disk flag!
                 // From here on out fReindex and fReset mean something different!
-                // ── Phase 2: Warm-boot peer-consensus startup ──────────────────────
-                // Try loading only the last 2016 headers from the NEDB-persisted tip.
-                // If successful, startup takes seconds instead of scanning the full
-                // chain. Falls back to the full LoadBlockIndex scan on any failure.
+                // ── NEDB Proof-of-Prefix warm boot ─────────────────────────────────
+                // Step 1 (local, instant): ask the NEDB engine to verify its own
+                //   tamper-evidence. This walks the content-addressed objects and
+                //   confirms each still hashes to its address — the storage-layer
+                //   equivalent of replaying and re-hashing the whole chain, but
+                //   native and near-instant (no LevelDB-style full reindex). If
+                //   Node B's local store is corrupt we cannot trust its tip: wipe
+                //   the index and resync from height 0.
+                // Step 2 (canonical): warm-boot the last 2016 headers from the
+                //   persisted tip. ProcessHeadersMessage then closes the seam
+                //   against the seed anchor (Node A); the watchdog falls back to a
+                //   full resync from 0 if the tip is never confirmed.
+                // A previous run's watchdog may have flagged the tip as
+                //   unconfirmed — in that case skip warm boot and full-scan now.
                 {
                     bool warm_ok = false;
-                    {
-                        LOCK(cs_main);
-                        warm_ok = chainman.ActiveChainstate().TryWarmBoot(
-                            *pblocktree, chainparams.GetConsensus());
+
+                    bool warmboot_blocked = false;
+                    pblocktree->ReadFlag("nedb_warmboot_unconfirmed", warmboot_blocked);
+                    if (warmboot_blocked) {
+                        LogPrintf("NEDB Proof-of-Prefix: previous run could not confirm the persisted tip against the network — full scan from height 0 this start.\n");
+                        pblocktree->WriteFlag("nedb_warmboot_unconfirmed", false); // consume the flag
                     }
+
+                    const int64_t t_verify0 = GetTimeMillis();
+                    const int nedb_problems = (!fReset && !fReindex) ? pblocktree->Verify() : -1;
+                    if (nedb_problems > 0) {
+                        LogPrintf("NEDB integrity: %d object(s) FAILED verification after %dms — local chain is not trustworthy. Wiping index and resyncing from height 0.\n",
+                                  nedb_problems, (int)(GetTimeMillis() - t_verify0));
+                        fReindex = true;
+                        pblocktree->WriteReindexing(true);
+                    } else {
+                        if (nedb_problems == 0) {
+                            LogPrintf("NEDB integrity: store verified intact in %dms (state root %s).\n",
+                                      (int)(GetTimeMillis() - t_verify0),
+                                      pblocktree->GetStateRoot().substr(0, 16));
+                        }
+                        if (!warmboot_blocked && !fReindex) {
+                            LOCK(cs_main);
+                            warm_ok = chainman.ActiveChainstate().TryWarmBoot(
+                                *pblocktree, chainparams.GetConsensus());
+                        }
+                    }
+
                     if (warm_ok) {
                         g_warm_boot_active = true;
                     } else {
@@ -1984,6 +2021,17 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
     connOptions.nSendBufferMaxSize = 1000 * args.GetArg("-maxsendbuffer", DEFAULT_MAXSENDBUFFER);
     connOptions.nReceiveFloodSize = 1000 * args.GetArg("-maxreceivebuffer", DEFAULT_MAXRECEIVEBUFFER);
     connOptions.m_added_nodes = args.GetArgs("-addnode");
+    // NEDB Proof-of-Prefix anchor (Node A): on mainnet, always keep a persistent
+    // connection to the canonical seed node that has been online since genesis.
+    // The warm-boot seam is verified against the chain this anchor serves, so a
+    // freshly compiled Node B can confirm its NEDB tip is canonical and sync
+    // forward — or fall back to a full resync from height 0 if it is not. User
+    // -addnode peers are preserved; the added-node manager de-duplicates, so a
+    // user who also lists the anchor is harmless.
+    if (Params().NetworkIDString() == CBaseChainParams::MAIN) {
+        connOptions.m_added_nodes.push_back("seed.interchained.org:17101");
+        LogPrintf("NEDB Proof-of-Prefix: pinned warm-boot anchor seed.interchained.org:17101\n");
+    }
 
     connOptions.nMaxOutboundTimeframe = nMaxOutboundTimeframe;
     connOptions.nMaxOutboundLimit = nMaxOutboundLimit;
@@ -2048,6 +2096,23 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
     }
     if (!node.connman->Start(*node.scheduler, connOptions)) {
         return false;
+    }
+
+    // NEDB Proof-of-Prefix watchdog. If warm boot has not been confirmed by the
+    // network within the deadline, the persisted tip is not demonstrably on the
+    // canonical chain (the seed anchor never extended it). We do NOT wipe live —
+    // the safe destructive action belongs at the controlled startup path — so we
+    // record a durable flag and log loudly; the next start does a full scan from
+    // height 0 instead of warm boot. If the seam verified first, this is a no-op.
+    if (g_warm_boot_active.load()) {
+        node.scheduler->scheduleFromNow([]{
+            if (g_warm_boot_active.load() && !g_warm_boot_verified.load()) {
+                LogPrintf("WarmBoot WATCHDOG: NEDB Proof-of-Prefix NOT confirmed within deadline — the seed anchor never extended our tip %s @ %d. Marking for a full resync from height 0 on next start.\n",
+                          g_warm_boot_tip_hash.GetHex().substr(0, 16),
+                          g_warm_boot_tip_height);
+                if (pblocktree) pblocktree->WriteFlag("nedb_warmboot_unconfirmed", true);
+            }
+        }, std::chrono::minutes{2});
     }
 
     // ********************************************************* Step 13: finished

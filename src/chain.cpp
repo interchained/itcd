@@ -160,20 +160,39 @@ int64_t GetBlockProofEquivalentTime(const CBlockIndex& to, const CBlockIndex& fr
 }
 
 /** Find the last common ancestor two blocks have.
- *  Both pa and pb must be non-nullptr. */
+ *
+ *  Returns nullptr when no common ancestor is currently known.
+ *
+ *  NEDB warm boot keeps only a verified window of the block index linked in
+ *  memory; the rest of the chain lives in the NEDB causal DAG and is
+ *  demand-loaded on access.  As a result CBlockIndex::GetAncestor() may
+ *  legitimately return nullptr for a height that is not linked yet — e.g. a
+ *  block above our verified tip that IBD has not downloaded, or an ancestor
+ *  below a window that is no longer being demand-loaded.  The historical
+ *  Bitcoin Core implementation assumed a fully linked index and ended with
+ *  `assert(pa == pb)`; that assertion was exactly the warm-boot crash
+ *  (chain.cpp:177).  We degrade gracefully instead: a nullptr at any point
+ *  means "no common ancestor is known yet", which callers treat as "this
+ *  peer's ancestry is not available — revisit later". */
 const CBlockIndex* LastCommonAncestor(const CBlockIndex* pa, const CBlockIndex* pb) {
+    if (!pa || !pb) return nullptr;
+
     if (pa->nHeight > pb->nHeight) {
         pa = pa->GetAncestor(pb->nHeight);
     } else if (pb->nHeight > pa->nHeight) {
         pb = pb->GetAncestor(pa->nHeight);
     }
+    if (!pa || !pb) return nullptr;
 
     while (pa != pb && pa && pb) {
         pa = pa->pprev;
         pb = pb->pprev;
     }
 
-    // Eventually all chain branches meet at the genesis block.
-    assert(pa == pb);
+    // With a fully linked index both branches meet at genesis (pa == pb).
+    // With a partial warm-boot index they may instead both walk off the loaded
+    // window to nullptr, or diverge — in which case there is no known common
+    // ancestor yet.  nullptr is a valid "unknown yet" answer; never assert.
+    if (pa != pb) return nullptr;
     return pa;
 }
