@@ -3296,7 +3296,13 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block)
     {
         pindexNew->pprev = (*miPrev).second;
         pindexNew->nHeight = pindexNew->pprev->nHeight + 1;
-        pindexNew->BuildSkip();
+        // Skip-pointer construction requires full ancestry back to genesis.
+        // During warm boot only 2016 headers are loaded, so GetAncestor called
+        // from BuildSkip would walk off the bottom of the loaded window and
+        // assert on a null pprev stub.  Defer BuildSkip until a cold-start full
+        // scan, when every block from genesis is in m_block_index.
+        if (!g_warm_boot_active)
+            pindexNew->BuildSkip();
     }
     pindexNew->nTimeMax = (pindexNew->pprev ? std::max(pindexNew->pprev->nTimeMax, pindexNew->nTime) : pindexNew->nTime);
     pindexNew->nChainWork = (pindexNew->pprev ? pindexNew->pprev->nChainWork : 0) + GetBlockProof(*pindexNew);
