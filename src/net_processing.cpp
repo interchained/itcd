@@ -1806,19 +1806,21 @@ void PeerManager::ProcessHeadersMessage(CNode& pfrom, const std::vector<CBlockHe
         !g_warm_boot_tip_hash.IsNull())
     {
         if (headers[0].hashPrevBlock == g_warm_boot_tip_hash) {
+            // Peer's first response to our GETHEADERS starts exactly at our stored
+            // tip — the 4032-block window is closed and the chain is verified.
             g_warm_boot_verified.store(true);
-            LogPrintf("WarmBoot: peer=%d seam VERIFIED — network tip continues from our stored tip %s\n",
+            LogPrintf("WarmBoot: peer=%d seam VERIFIED — tip %s confirmed by network\n",
                       pfrom.GetId(),
                       g_warm_boot_tip_hash.GetHex().substr(0, 16));
         } else {
-            // Peer's chain does not connect to our warm-boot tip — wrong fork or
-            // deep reorg.  Cancel warm boot so the node falls back to a fresh
-            // full scan on the next restart.
-            LogPrintf("WarmBoot: peer=%d seam MISMATCH — expected %s got prev %s — warm boot cancelled\n",
+            // This HEADERS message does not start from our warm-boot tip.  This is
+            // normal during IBD: peers announce new blocks (at height 633k+) before
+            // our initial GETHEADERS response arrives.  Log but do NOT cancel warm
+            // boot — the on-demand ancestry loader handles any depth, and the seam
+            // verification will succeed when the GETHEADERS response arrives.
+            LogPrint(BCLog::NET, "WarmBoot: peer=%d headers not from our tip (got prev %s) — waiting for GETHEADERS response\n",
                       pfrom.GetId(),
-                      g_warm_boot_tip_hash.GetHex().substr(0, 16),
                       headers[0].hashPrevBlock.GetHex().substr(0, 16));
-            g_warm_boot_active.store(false);
         }
     }
     // ─────────────────────────────────────────────────────────────────────────
