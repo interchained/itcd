@@ -30,7 +30,7 @@ use {
 // ── Phase 2 imports ───────────────────────────────────────────────────────────
 #[cfg(feature = "phase2")]
 use {
-    nedb_core_v2::{Db, Dek},
+    nedb_engine::{Db, Dek},
     serde_json::json,
     std::path::Path,
     std::sync::Arc,
