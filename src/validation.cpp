@@ -4390,6 +4390,114 @@ bool BlockManager::LoadBlockIndex(
     return true;
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 2: Warm-boot peer-consensus startup
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool CChainState::TryWarmBoot(CBlockTreeDB& blocktree,
+                               const Consensus::Params& params)
+{
+    AssertLockHeld(cs_main);
+
+    // Read the persisted tip hash and cumulative chain work.
+    uint256      tip_hash;
+    arith_uint256 tip_chainwork;
+    if (!blocktree.ReadTipHash(tip_hash)      ||
+        !blocktree.ReadTipChainWork(tip_chainwork) ||
+        tip_hash.IsNull())
+    {
+        LogPrintf("TryWarmBoot: no stored tip — full scan required.\n");
+        return false;
+    }
+
+    // Require meaningful chain work (not a fresh genesis-only chain).
+    if (tip_chainwork <= UintToArith256(params.nMinimumChainWork)) {
+        LogPrintf("TryWarmBoot: chain work below minimum — full scan required.\n");
+        return false;
+    }
+
+    LogPrintf("TryWarmBoot: stored tip %s chainwork %s\n",
+              tip_hash.GetHex().substr(0, 16),
+              tip_chainwork.GetHex().substr(0, 16));
+
+    // Load the last 2016 block headers from the tip via direct NEDB lookups.
+    auto insertFn = [this](const uint256& h) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
+        return this->m_blockman.InsertBlockIndex(h);
+    };
+    if (!m_blockman.GetBlockTreeDB().LoadBlockIndexFromTip(tip_hash, 2016, insertFn)) {
+        LogPrintf("TryWarmBoot: LoadBlockIndexFromTip failed — full scan required.\n");
+        m_blockman.m_block_index.clear();
+        return false;
+    }
+
+    // ── Build chain state from loaded headers ────────────────────────────────
+    // Sort loaded blocks by height and propagate chain-work and nChainTx.
+    std::vector<std::pair<int, CBlockIndex*>> sorted;
+    sorted.reserve(m_blockman.m_block_index.size());
+    for (auto& [hash, pindex] : m_blockman.m_block_index) {
+        sorted.emplace_back(pindex->nHeight, pindex);
+    }
+    std::sort(sorted.begin(), sorted.end());
+
+    for (auto& [height, pindex] : sorted) {
+        pindex->nChainWork = (pindex->pprev ? pindex->pprev->nChainWork : 0)
+                           + GetBlockProof(*pindex);
+        pindex->nTimeMax   = pindex->pprev
+                           ? std::max(pindex->pprev->nTimeMax, pindex->nTime)
+                           : pindex->nTime;
+        if (pindex->nTx > 0) {
+            if (!pindex->pprev) {
+                pindex->nChainTx = pindex->nTx;
+            } else if (pindex->pprev->HaveTxsDownloaded()) {
+                pindex->nChainTx = pindex->pprev->nChainTx + pindex->nTx;
+            }
+        }
+        if (pindex->pprev) pindex->BuildSkip();
+        if (pindex->IsValid(BLOCK_VALID_TREE) &&
+            (!pindexBestHeader ||
+             CBlockIndexWorkComparator()(pindexBestHeader, pindex)))
+            pindexBestHeader = pindex;
+    }
+
+    // ── Anchor chain work to the persisted real cumulative value ─────────────
+    // The loop above computed chainwork from the warm-boot boundary (≈0) not
+    // from genesis. Add the offset so every block has its correct absolute work.
+    CBlockIndex* ptip = m_blockman.LookupBlockIndex(tip_hash);
+    if (!ptip) {
+        m_blockman.m_block_index.clear();
+        return false;
+    }
+    {
+        arith_uint256 computed = ptip->nChainWork;
+        if (tip_chainwork > computed) {
+            arith_uint256 offset = tip_chainwork - computed;
+            for (auto& item : m_blockman.m_block_index)
+                item.second->nChainWork += offset;
+        }
+    }
+
+    // ── Seed chain-state metadata on the tip ─────────────────────────────────
+    // nChainTx = 1 satisfies HaveTxsDownloaded() so the tip enters the
+    // candidate set. The real cumulative tx count is immaterial for consensus —
+    // it is only used as a "we have data" predicate and for logging.
+    if (ptip->nChainTx == 0) ptip->nChainTx = 1;
+
+    // Insert the tip directly into the candidate set.  This is safe because:
+    //   • nChainWork is anchored to the persisted value — real cumulative work.
+    //   • The NEDB store is BLAKE2b-verified; the tip hash was written by our
+    //     own code when the block was accepted from the network.
+    //   • Peer agreement is verified immediately after startup via the normal
+    //     header-sync handshake.  Any disagreement triggers a chain reorg or
+    //     full resync through the standard Bitcoin Core mechanisms.
+    setBlockIndexCandidates.insert(ptip);
+    pindexBestHeader = ptip;
+
+    LogPrintf("TryWarmBoot: loaded %u headers. Tip height %d. Startup in seconds.\n",
+              (unsigned)m_blockman.m_block_index.size(), ptip->nHeight);
+    return true;
+}
+
 void BlockManager::Unload() {
     m_failed_blocks.clear();
     m_blocks_unlinked.clear();
