@@ -177,7 +177,10 @@ jobs:
           # (interchainedd + interchained-wallet both link libnedb_ffi).
           echo "interchainedd_LDADD += -Wl,--allow-multiple-definition -Wl,--whole-archive,${NEDB_LIB},--no-whole-archive" \
             >> src/Makefile
-          echo "LIBS += -lboost_thread-mt -lboost_chrono-mt -lboost_filesystem-mt -lws2_32 -lbcrypt -lntdll -luserenv -lsodium" \
+          # -lntdll removed: explicit ntdll import causes Windows to eagerly resolve
+          # ntdll's own kernel deps (ksecdd.sys) at load time — "ksecdd.sys not found".
+          # ntdll is always implicitly loaded; never link it explicitly.
+          echo "LIBS += -lboost_thread-mt -lboost_chrono-mt -lboost_filesystem-mt -lws2_32 -lbcrypt -luserenv -lsodium" \
             >> src/Makefile
 
           make -j"$J"
