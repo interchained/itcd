@@ -3296,13 +3296,10 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block)
     {
         pindexNew->pprev = (*miPrev).second;
         pindexNew->nHeight = pindexNew->pprev->nHeight + 1;
-        // Skip-pointer construction requires full ancestry back to genesis.
-        // During warm boot only 2016 headers are loaded, so GetAncestor called
-        // from BuildSkip would walk off the bottom of the loaded window and
-        // assert on a null pprev stub.  Defer BuildSkip until a cold-start full
-        // scan, when every block from genesis is in m_block_index.
-        if (!g_warm_boot_active)
-            pindexNew->BuildSkip();
+        // BuildSkip calls GetAncestor which may walk below the warm-boot window.
+        // WarmBootLoadParent fires in GetAncestor when pprev is null, fetching
+        // the missing block from NEDB on demand so the walk always completes.
+        pindexNew->BuildSkip();
     }
     pindexNew->nTimeMax = (pindexNew->pprev ? std::max(pindexNew->pprev->nTimeMax, pindexNew->nTime) : pindexNew->nTime);
     pindexNew->nChainWork = (pindexNew->pprev ? pindexNew->pprev->nChainWork : 0) + GetBlockProof(*pindexNew);
@@ -4380,6 +4377,58 @@ bool BlockManager::LoadBlockIndex(
     return true;
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Warm-boot on-demand ancestor loader (declared in chain.h)
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool WarmBootLoadParent(CBlockIndex* pindex)
+{
+    // Called from GetAncestor under cs_main — do not re-lock.
+    AssertLockHeld(cs_main);
+
+    if (!g_warm_boot_active || !pblocktree || !pindex || !pindex->phashBlock)
+        return false;
+
+    // Read this block's stored entry to get its parent hash.
+    CDiskBlockIndex di;
+    if (!pblocktree->ReadBlockIndex(*pindex->phashBlock, di) || di.hashPrev.IsNull())
+        return false;
+
+    // Find or create the parent CBlockIndex.
+    BlockMap& idx = g_chainman.BlockIndex();
+    CBlockIndex* parent = nullptr;
+    {
+        auto it = idx.find(di.hashPrev);
+        if (it != idx.end()) {
+            parent = it->second;
+        } else {
+            parent = ::ChainstateActive().m_blockman.InsertBlockIndex(di.hashPrev);
+        }
+    }
+    if (!parent) return false;
+
+    // Populate if still a stub (nStatus == 0 means no data loaded yet).
+    if (parent->nStatus == 0) {
+        CDiskBlockIndex pdi;
+        if (!pblocktree->ReadBlockIndex(di.hashPrev, pdi)) return false;
+        parent->nHeight        = pdi.nHeight;
+        parent->nVersion       = pdi.nVersion;
+        parent->hashMerkleRoot = pdi.hashMerkleRoot;
+        parent->nTime          = pdi.nTime;
+        parent->nBits          = pdi.nBits;
+        parent->nNonce         = pdi.nNonce;
+        parent->nStatus        = pdi.nStatus;
+        parent->nTx            = pdi.nTx;
+        parent->nChainWork     = (parent->pprev ? parent->pprev->nChainWork : 0)
+                                 + GetBlockProof(*parent);
+        // parent->pprev loaded on demand if GetAncestor walks further.
+    }
+
+    pindex->pprev = parent;
+    return true;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 2: Warm-boot peer-consensus startup

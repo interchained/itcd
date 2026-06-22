@@ -429,4 +429,16 @@ public:
     CBlockIndex* FindEarliestAtLeast(int64_t nTime, int height) const;
 };
 
+/**
+ * Warm-boot on-demand ancestor loader.
+ *
+ * Called by CBlockIndex::GetAncestor when pprev is null and the walk needs to
+ * continue further back.  Implemented in validation.cpp: reads the parent block
+ * from the NEDB block tree, populates a CBlockIndex entry, and sets pindex->pprev.
+ *
+ * Returns true if the parent was successfully loaded; false if unavailable
+ * (not in warm-boot mode, database not open, or block not stored yet).
+ */
+bool WarmBootLoadParent(CBlockIndex* pindex);
+
 #endif // BITCOIN_CHAIN_H

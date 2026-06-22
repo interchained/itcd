@@ -100,7 +100,13 @@ const CBlockIndex* CBlockIndex::GetAncestor(int height) const
             pindexWalk = pindexWalk->pskip;
             heightWalk = heightSkip;
         } else {
-            assert(pindexWalk->pprev);
+            if (!pindexWalk->pprev) {
+                // pprev is null — during warm boot the full chain is in NEDB but
+                // only 2016 headers were pre-loaded.  Try to fetch the parent now.
+                if (!WarmBootLoadParent(const_cast<CBlockIndex*>(pindexWalk))) {
+                    assert(pindexWalk->pprev); // not warm boot or load failed
+                }
+            }
             pindexWalk = pindexWalk->pprev;
             heightWalk--;
         }
