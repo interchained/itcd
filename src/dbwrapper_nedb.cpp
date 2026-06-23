@@ -28,6 +28,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <thread>
+#include <chrono>
 
 // ---------------------------------------------------------------------------
 // dbwrapper_private
@@ -64,20 +66,27 @@ CDBWrapper::CDBWrapper(const fs::path& path, size_t nCacheSize,
 
     if (fWipe) {
         LogPrintf("NEDB: wiping data directory %s\n", m_name);
-        // Actually clear the on-disk NEDB store. Previously this was a no-op
-        // (it only logged), so -reindex / -reindex-chainstate / fReset left the
-        // stored sequences + MANIFEST intact. That stale state surfaced as a
-        // non-null view.GetBestBlock() on a "fresh" chainstate, tripping
+        // -reindex / fReset must give nedb_open() a genuinely empty store (a
+        // stale MANIFEST/best-block otherwise trips ConnectBlock's
         //   assert(hashPrevBlock == view.GetBestBlock())
-        // in ConnectBlock() the moment the genesis block was reconnected.
-        // Remove the directory tree here; nedb_open() recreates the structure
-        // immediately below, giving a genuinely empty store.
+        // on the genesis reconnect). But the NEDB store is hundreds of thousands
+        // of tiny content-addressed object files, and a SYNCHRONOUS fs::remove_all
+        // blocks startup for minutes (looks hung). So rename the tree aside —
+        // instant, same filesystem — and delete it on a detached background
+        // thread; nedb_open() recreates a fresh store immediately below.
         try {
             if (fs::exists(path)) {
-                fs::remove_all(path);
+                fs::path trash = path;
+                trash += ".wipe-" + std::to_string(
+                    std::chrono::steady_clock::now().time_since_epoch().count());
+                fs::rename(path, trash);
+                std::thread([trash]{ try { fs::remove_all(trash); } catch (...) {} }).detach();
+                LogPrintf("NEDB: store moved aside, deleting in background (%s)\n", trash.string());
             }
         } catch (const std::exception& e) {
-            LogPrintf("NEDB: WARNING — wipe of %s failed: %s\n", m_name, e.what());
+            // e.g. cross-filesystem rename — fall back to a synchronous remove.
+            LogPrintf("NEDB: wipe rename failed (%s); removing synchronously\n", e.what());
+            try { if (fs::exists(path)) fs::remove_all(path); } catch (...) {}
         }
     }
 
