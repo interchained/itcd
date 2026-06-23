@@ -300,14 +300,26 @@ bool CBlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockF
     }
     batch.Write(DB_LAST_BLOCK, nLastFile);
 
-    // Find the block with the highest chain work in this batch — that becomes
-    // the new persisted tip.  Writing tip hash + chain work in the same atomic
-    // batch as the block index entries guarantees they are always consistent:
-    // the tip hash will only point to a block that exists in NEDB.
+    // Find the warm-boot tip in this batch — the highest-work block we can
+    // actually RESUME from.  Writing tip hash + chain work in the same atomic
+    // batch as the block index entries keeps them consistent: the tip hash will
+    // only point to a block that exists in NEDB.
+    //
+    // CRITICAL: the dirty batch contains header-only indices too. During IBD,
+    // headers-first sync races the header chain hundreds of thousands of blocks
+    // ahead of the connected (data) chain, so the highest-work entry is usually a
+    // HEADER with no block body and no UTXO state. Persisting that as the tip
+    // makes the next warm boot anchor to a block whose chainstate was never built
+    // — ReplayBlocks then aborts with "reorganization to unknown block requested"
+    // (clean restart) or, under -reindex-chainstate, the wiped UTXO set never
+    // rebuilds. The only valid resume point is a block we fully HAVE: block data
+    // on disk (BLOCK_HAVE_DATA) and a connected tx chain (HaveTxsDownloaded()).
+    // Restrict the persisted tip to those; header-only entries are ignored.
     const CBlockIndex* pBestInBatch = nullptr;
     for (std::vector<const CBlockIndex*>::const_iterator it=blockinfo.begin(); it != blockinfo.end(); it++) {
         batch.Write(std::make_pair(DB_BLOCK_INDEX, (*it)->GetBlockHash()), CDiskBlockIndex(*it));
-        if (!pBestInBatch || (*it)->nChainWork > pBestInBatch->nChainWork)
+        if (((*it)->nStatus & BLOCK_HAVE_DATA) && (*it)->HaveTxsDownloaded() &&
+            (!pBestInBatch || (*it)->nChainWork > pBestInBatch->nChainWork))
             pBestInBatch = *it;
     }
     if (pBestInBatch) {

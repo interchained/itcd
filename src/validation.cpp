@@ -4538,6 +4538,27 @@ bool CChainState::TryWarmBoot(CBlockTreeDB& blocktree,
         m_blockman.m_block_index.clear();
         return false;
     }
+
+    // The persisted tip must be a block we can actually RESUME from — i.e. one
+    // whose block data is on disk. A tip without BLOCK_HAVE_DATA is a header-only
+    // entry (e.g. one written by an older build that persisted the best HEADER
+    // instead of the connected block tip): anchoring to it makes ReplayBlocks try
+    // to reorg the chainstate to a block whose UTXO state was never built, which
+    // aborts the node. Don't warm-boot to it — fall back to a full scan, which
+    // rebuilds to the real connected tip and (with the corrected WriteBatchSync)
+    // re-persists a valid data tip. This self-heals a poisoned tip with no resync
+    // and no manual -reindex.
+    //
+    // We key only on nStatus (persisted in CDiskBlockIndex and restored by
+    // LoadBlockIndexFromTip). nChainTx is NOT persisted — it is recomputed from
+    // genesis and is still 0 on the warm-boot-loaded tip here (force-seeded
+    // below), so HaveTxsDownloaded() must NOT be used at this point.
+    if (!(ptip->nStatus & BLOCK_HAVE_DATA)) {
+        LogPrintf("TryWarmBoot: persisted tip %s is header-only (no block data) — not a valid resume point; falling back to full scan.\n",
+                  tip_hash.GetHex().substr(0, 16));
+        m_blockman.m_block_index.clear();
+        return false;
+    }
     {
         arith_uint256 computed = ptip->nChainWork;
         if (tip_chainwork > computed) {

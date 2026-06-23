@@ -1686,7 +1686,14 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                         } else if (!fReset && !fReindex) {
                             LogPrintf("NEDB integrity: clean shutdown — skipping the O(n) integrity scan.\n");
                         }
-                        if (!warmboot_blocked && !fReindex) {
+                        // Skip warm boot under -reindex-chainstate too: it wipes
+                        // the chainstate, so the persisted tip can't be resumed —
+                        // the UTXO set must be rebuilt by ActivateBestChain. If we
+                        // warm-booted here, g_warm_boot_active would suppress that
+                        // rebuild scan and the node would hang on an empty
+                        // chainstate. A full block-index scan + replay is the
+                        // correct (and intended) path for an explicit reindex.
+                        if (!warmboot_blocked && !fReindex && !fReindexChainState) {
                             LOCK(cs_main);
                             warm_ok = chainman.ActiveChainstate().TryWarmBoot(
                                 *pblocktree, chainparams.GetConsensus());
