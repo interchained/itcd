@@ -291,6 +291,9 @@ void Shutdown(NodeContext& node)
                 chainstate->ResetCoinsViews();
             }
         }
+        // Chainstate is fully flushed — record a clean shutdown so the next start
+        // can skip the O(n) NEDB integrity scan (only unclean exits need it).
+        if (pblocktree) pblocktree->WriteFlag("nedb_clean_shutdown", true);
         pblocktree.reset();
     }
     for (const auto& client : node.chain_clients) {
@@ -1658,8 +1661,18 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                         pblocktree->WriteFlag("nedb_warmboot_unconfirmed", false); // consume the flag
                     }
 
+                    // The full-store NEDB verify is O(n) — tens of seconds at scale
+                    // — so only run it when it's actually needed: after an UNCLEAN
+                    // exit. A graceful shutdown sets "nedb_clean_shutdown"=true; we
+                    // read it, then immediately clear it (this run stays "dirty"
+                    // until we stop cleanly). Clean last exit => trust the store and
+                    // skip the scan; an unclean kill => verify (and wipe if bad).
+                    bool clean_shutdown = false;
+                    pblocktree->ReadFlag("nedb_clean_shutdown", clean_shutdown);
+                    pblocktree->WriteFlag("nedb_clean_shutdown", false);
+                    const bool want_verify = !fReset && !fReindex && !clean_shutdown;
                     const int64_t t_verify0 = GetTimeMillis();
-                    const int nedb_problems = (!fReset && !fReindex) ? pblocktree->Verify() : -1;
+                    const int nedb_problems = want_verify ? pblocktree->Verify() : -1;
                     if (nedb_problems > 0) {
                         LogPrintf("NEDB integrity: %d object(s) FAILED verification after %dms — local chain is not trustworthy. Wiping index and resyncing from height 0.\n",
                                   nedb_problems, (int)(GetTimeMillis() - t_verify0));
@@ -1670,6 +1683,8 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                             LogPrintf("NEDB integrity: store verified intact in %dms (state root %s).\n",
                                       (int)(GetTimeMillis() - t_verify0),
                                       pblocktree->GetStateRoot().substr(0, 16));
+                        } else if (!fReset && !fReindex) {
+                            LogPrintf("NEDB integrity: clean shutdown — skipping the O(n) integrity scan.\n");
                         }
                         if (!warmboot_blocked && !fReindex) {
                             LOCK(cs_main);
