@@ -449,3 +449,39 @@ Residual: `Db::start_cold_scan` is still an engine-spawned thread, but it is
 finite (scans once, then exits) and is skipped entirely on warm start, so it is
 not a recurring teardown hazard. Give it the same stop+join treatment if cold
 starts ever show shutdown races.
+
+## Slow UTXO flush — parallelise the chainstate batch (`nedb-ffi/src/lib.rs`)
+
+`FlushStateToDisk` was taking 40s+ to write ~30k coins (a 2-3 min, signal-deaf
+shutdown). Cause: `nedb_batch_write` ran a **serial** loop of single `db.put()`
+calls, each writing a content-addressed object file, plus a `db.get()` per coin
+to establish `caused_by`. ~700 ops/s.
+
+Fix: build the put ops with `rayon` `par_iter` (the `caused_by` read-before-write
+fans out across cores — **provenance is fully retained, that is non-negotiable**)
+and commit them via `Db::put_batch`, which writes all objects in parallel and
+chains the causal DAG + Merkle head in one pass. Deletes parallelised too.
+Do NOT "optimise" this by dropping `caused_by` — the causal chain is the
+integrity backbone. Deeper ceiling (for later): the per-object-file store is
+inherently file-heavy on NTFS; a packed/log-structured object write is the next
+win, not removing provenance.
+
+## Warm-boot RESUME must not reset to genesis (`validation.cpp` `LoadChainTip`)
+
+Symptom: a node synced to ~50k blocks, restarted, and came back at **0 blocks**
+while headers flew — "how did we lose 50k blocks". They were not lost (still in
+NEDB); the node lost its **place**.
+
+Cause: warm boot loads the 2016-block window around the **header tip**, but the
+**validated chainstate tip** is lower during IBD (block validation lags header
+sync). `LoadChainTip` couldn't find the chainstate tip in the window and
+`SetTip(genesis)` — restarting IBD from 0 on every restart.
+
+Fix: when the validated tip isn't in the window, **demand-load that tip + its
+full ancestor chain from NEDB** (verifying genesis-contiguity), recompute
+nChainWork/nChainTx, add to the candidate set, and `SetTip(validated_tip)` — the
+node resumes exactly where validation left off. Only if the chain can't be made
+contiguous (e.g. an ungraceful-kill gap) does it fall back to the genesis anchor.
+Do NOT revert to the unconditional genesis anchor — it silently discards sync
+progress across restarts. (Follow-up: this resume walk is per-entry NEDB reads;
+for deep tips, center the warm window on the validated tip or bulk-load.)

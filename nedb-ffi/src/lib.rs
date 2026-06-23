@@ -365,29 +365,58 @@ pub extern "C" fn nedb_batch_write(handle: *mut NedbHandle, ops: *const NedbOp, 
 
     #[cfg(feature = "phase2")]
     {
+        use rayon::prelude::*;
         let h = unsafe { &*handle };
+        let db   = &h.db;
+        let coll: &str = &h.coll;
+
+        // Copy key/value bytes into owned buffers first. The raw C pointers are
+        // not Send, so they cannot be touched from rayon worker threads; the
+        // owned Vecs can.
+        let mut puts_raw: Vec<(String, Vec<u8>)> = Vec::with_capacity(ops_slice.len());
+        let mut del_ids:  Vec<String>            = Vec::new();
         for op in ops_slice {
             if op.key.is_null() { continue; }
             let k   = unsafe { std::slice::from_raw_parts(op.key, op.key_len) };
             let kid = hex::encode(k);
             if op.value.is_null() {
-                let _ = h.db.delete(&h.coll, &kid);
+                del_ids.push(kid);
             } else {
-                let v       = unsafe { std::slice::from_raw_parts(op.value, op.value_len) };
-                let vh      = hex::encode(v);
-                let caused_by = h.db.get(&h.coll, &kid)
+                let v = unsafe { std::slice::from_raw_parts(op.value, op.value_len) }.to_vec();
+                puts_raw.push((kid, v));
+            }
+        }
+
+        // Build the put ops IN PARALLEL while preserving causal provenance:
+        // every write is caused_by the previous version's content hash for that
+        // key — the version chain TRACE walks and the integrity backbone of the
+        // NEDB-backed chain. The read-before-write that establishes provenance
+        // is what used to run serially (≈700 ops/s → 40s+ UTXO flushes); here it
+        // fans out across every core. Provenance is fully retained.
+        let put_ops: Vec<(String, String, serde_json::Value, Vec<String>, Option<String>, Option<String>)> =
+            puts_raw.par_iter().map(|(kid, val)| {
+                let caused_by = db.get(coll, kid)
                     .filter(|n| !n.hash.is_empty())
                     .map(|n| vec![n.hash.clone()])
                     .unwrap_or_default();
-                let _ = h.db.put(&h.coll, &kid, json!({"v": vh}), caused_by, None, None);
-            }
+                (coll.to_string(), kid.clone(), json!({ "v": hex::encode(val) }), caused_by, None, None)
+            }).collect();
+
+        // Deletes (spent coins) — tombstones. Parallelised too; distinct keys, no
+        // collision with the puts within a single chainstate flush.
+        if !del_ids.is_empty() {
+            del_ids.par_iter().for_each(|kid| { let _ = db.delete(coll, kid); });
         }
-        // Flush WAL + MANIFEST after every batch commit.
-        // This is the block-level durability point — equivalent to LevelDB's fsync.
-        // Individual nedb_put calls buffer to WAL (zero disk I/O per write).
-        // flush_all() = id_index.flush_write_buf() + flush_manifest()
-        // One disk flush per batch, not per write. Fast and durable.
-        h.db.flush_all();
+
+        // put_batch writes all content-addressed objects in parallel (rayon),
+        // assigns one contiguous seq range, and chains the caused_by DAG edges +
+        // Merkle head in a single pass. This replaces N serial single-puts.
+        if !put_ops.is_empty() {
+            if db.put_batch(put_ops).is_err() { return -1; }
+        }
+
+        // One durability point per batch — flush id-index WAL + MANIFEST.
+        db.flush_all();
         0
     }
 }

@@ -4705,14 +4705,66 @@ bool CChainState::LoadChainTip(const CChainParams& chainparams)
 
     // Load pointer to end of best chain
     CBlockIndex* pindex = LookupBlockIndex(coins_cache.GetBestBlock());
+    if (!pindex && g_warm_boot_active) {
+        // Warm boot loaded only the header-tip window, but the VALIDATED
+        // chainstate tip is lower (block validation lags header sync during IBD),
+        // so it is not in that window. Anchoring to genesis here is exactly what
+        // made every restart restart IBD from height 0 ("50k blocks gone"). The
+        // blocks are not lost — they are in NEDB — the node just lost its place.
+        // Demand-load the validated tip + its full ancestor chain from NEDB so
+        // the active chain resumes precisely where validation left off.
+        const uint256 best_hash = coins_cache.GetBestBlock();
+        CBlockIndex* pbest = m_blockman.InsertBlockIndex(best_hash);
+        for (CBlockIndex* p = pbest; p && p->nStatus == 0; p = p->pprev) {
+            if (ShutdownRequested()) return false;
+            CDiskBlockIndex di;
+            if (!pblocktree->ReadBlockIndex(p->GetBlockHash(), di)) break;
+            p->pprev          = m_blockman.InsertBlockIndex(di.hashPrev);
+            p->nHeight        = di.nHeight;
+            p->nFile          = di.nFile;
+            p->nDataPos       = di.nDataPos;
+            p->nUndoPos       = di.nUndoPos;
+            p->nVersion       = di.nVersion;
+            p->hashMerkleRoot = di.hashMerkleRoot;
+            p->nTime          = di.nTime;
+            p->nBits          = di.nBits;
+            p->nNonce         = di.nNonce;
+            p->nStatus        = di.nStatus;
+            p->nTx            = di.nTx;
+        }
+        // Only resume if the chain back to genesis is fully linked (no gap).
+        std::vector<CBlockIndex*> chain;
+        bool contiguous = true;
+        for (CBlockIndex* q = pbest; q; q = q->pprev) {
+            if (q->nStatus == 0) { contiguous = false; break; }   // unfilled stub = gap
+            chain.push_back(q);
+            if (q->pprev == nullptr) break;                        // reached the root
+        }
+        if (contiguous && !chain.empty() && chain.back()->nHeight == 0) {
+            std::reverse(chain.begin(), chain.end());              // genesis → tip
+            for (CBlockIndex* q : chain) {
+                q->nChainWork = (q->pprev ? q->pprev->nChainWork : 0) + GetBlockProof(*q);
+                q->nTimeMax   = (q->pprev ? std::max(q->pprev->nTimeMax, q->nTime) : q->nTime);
+                if (q->nTx > 0) {
+                    if (q->pprev) q->nChainTx = q->pprev->HaveTxsDownloaded() ? q->pprev->nChainTx + q->nTx : 0;
+                    else          q->nChainTx = q->nTx;
+                }
+                if (q->IsValid(BLOCK_VALID_TRANSACTIONS) && (q->HaveTxsDownloaded() || q->pprev == nullptr))
+                    setBlockIndexCandidates.insert(q);
+            }
+            pindex = pbest;
+            LogPrintf("LoadChainTip: warm boot — resumed validated chainstate tip %s @ %d from NEDB; no progress lost.\n",
+                      best_hash.GetHex().substr(0, 16), pbest->nHeight);
+        }
+    }
     if (!pindex) {
-        // Warm boot only loaded 2016 headers — the chainstate's persisted tip is
-        // outside the loaded window.  Fall back to genesis so the chain starts
-        // from a known-good anchor; IBD will resync the chainstate from there.
+        // Could not resume the validated tip (e.g. an ungraceful-kill gap in the
+        // NEDB store). Last resort: anchor to genesis so the node still starts and
+        // IBD rebuilds; a -reindex gives a clean store if the gap persists.
         if (g_warm_boot_active) {
             pindex = LookupBlockIndex(chainparams.GetConsensus().hashGenesisBlock);
             if (!pindex) return false;
-            LogPrintf("LoadChainTip: warm boot — chainstate tip outside window, anchoring to genesis for IBD resync.\n");
+            LogPrintf("LoadChainTip: warm boot — validated tip not fully loadable from NEDB; anchoring to genesis.\n");
         } else {
             return false;
         }
