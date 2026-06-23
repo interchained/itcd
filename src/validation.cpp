@@ -2385,6 +2385,12 @@ bool CChainState::FlushStateToDisk(
     assert(this->CanFlushToDisk());
     static std::chrono::microseconds nLastWrite{0};
     static std::chrono::microseconds nLastFlush{0};
+    // Height of the active tip at the last full flush. -flushwindow uses this to
+    // force a full flush once the chain has advanced a bounded number of blocks,
+    // so a clean shutdown only ever has that window of dirty UTXO left to write.
+    static int nLastFlushHeight{0};
+    // Read -flushwindow once: full-flush cadence in connected blocks (0 = off).
+    static const int64_t flush_window_blocks = gArgs.GetArg("-flushwindow", DEFAULT_BLOCK_FLUSH_WINDOW);
     std::set<int> setFilesToPrune;
     bool full_flush_completed = false;
 
@@ -2432,8 +2438,13 @@ bool CChainState::FlushStateToDisk(
         bool fPeriodicWrite = mode == FlushStateMode::PERIODIC && nNow > nLastWrite + DATABASE_WRITE_INTERVAL;
         // It's been very long since we flushed the cache. Do this infrequently, to optimize cache usage.
         bool fPeriodicFlush = mode == FlushStateMode::PERIODIC && nNow > nLastFlush + DATABASE_FLUSH_INTERVAL;
+        // -flushwindow: the chain has advanced a bounded number of blocks since the
+        // last full flush. Force one now so a clean shutdown (or a crash) is only
+        // ever this many blocks of dirty UTXO behind, instead of the whole session.
+        bool fFlushWindow = mode == FlushStateMode::PERIODIC && flush_window_blocks > 0 &&
+                            (int64_t)(m_chain.Height() - nLastFlushHeight) >= flush_window_blocks;
         // Combine all conditions that result in a full cache flush.
-        fDoFullFlush = (mode == FlushStateMode::ALWAYS) || fCacheLarge || fCacheCritical || fPeriodicFlush || fFlushForPrune;
+        fDoFullFlush = (mode == FlushStateMode::ALWAYS) || fCacheLarge || fCacheCritical || fPeriodicFlush || fFlushForPrune || fFlushWindow;
         // Write blocks and block index to disk.
         if (fDoFullFlush || fPeriodicWrite) {
             // Depend on nMinDiskSpace to ensure we can write block index
@@ -2492,6 +2503,7 @@ bool CChainState::FlushStateToDisk(
             if (!CoinsTip().Flush())
                 return AbortNode(state, "Failed to write to coin database");
             nLastFlush = nNow;
+            nLastFlushHeight = m_chain.Height();
             full_flush_completed = true;
         }
     }

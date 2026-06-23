@@ -71,6 +71,11 @@ static const int MAX_SCRIPTCHECK_THREADS = 15;
 /** -par default (number of script-checking threads, 0 = auto) */
 static const int DEFAULT_SCRIPTCHECK_THREADS = 0;
 static const int64_t DEFAULT_MAX_TIP_AGE = 24 * 60 * 60;
+/** Default for -flushwindow: force a full chainstate flush every <n> connected
+ *  blocks during sync (0 = disabled; rely only on the cache-size/time triggers).
+ *  Bounds how much dirty UTXO a clean shutdown must write — and how much an
+ *  unclean exit loses — at the cost of some write amplification. */
+static const int64_t DEFAULT_BLOCK_FLUSH_WINDOW = 0;
 static const bool DEFAULT_CHECKPOINTS_ENABLED = true;
 static const bool DEFAULT_TXINDEX = false;
 static const char* const DEFAULT_BLOCKFILTERINDEX = "0";
