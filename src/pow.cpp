@@ -75,7 +75,7 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
 {
     assert(pindexLast != nullptr);
     const int nextHeight = pindexLast->nHeight + 1;
-    LogPrintf("GetNextWorkRequired: height=%d using %s\n", pindexLast->nHeight,
+    LogPrint(BCLog::VALIDATION,"GetNextWorkRequired: height=%d using %s\n", pindexLast->nHeight,
           IsPostSha256Fork(nextHeight, params) ? "SHA256 target (post-fork)"
                                                : (nextHeight >= params.yespowerForkHeight ? "Yespower target" : "SHA256 target"));
 
@@ -84,7 +84,7 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
     }
 
     arith_uint256 limit = UintToArith256(GetPowLimitForHeight(nextHeight, params));
-    LogPrintf("💡 GetNextWorkRequired: powLimit used = %s\n", limit.ToString());
+    LogPrint(BCLog::VALIDATION,"💡 GetNextWorkRequired: powLimit used = %s\n", limit.ToString());
     unsigned int nProofOfWorkLimit = limit.GetCompact();
 
     // Only change once per difficulty adjustment interval
@@ -126,7 +126,7 @@ unsigned int DarkGravityWave3Nova(const CBlockIndex* pindexLast, const Consensus
     const int nPastBlocks = (nextHeight >= params.nextDifficultyFork5Height) ? 12 : 24;
 
     arith_uint256 limit = UintToArith256(GetPowLimitForHeight(nextHeight, params));
-    LogPrintf("💡 DGW3-NOVA: powLimit used = %s (%s)\n", limit.ToString(),
+    LogPrint(BCLog::VALIDATION,"💡 DGW3-NOVA: powLimit used = %s (%s)\n", limit.ToString(),
               IsPostSha256Fork(nextHeight, params) ? "SHA256-post-fork" : "Yespower-era");
 
     if (nextHeight < nPastBlocks)
@@ -182,14 +182,14 @@ unsigned int DarkGravityWave3Nova(const CBlockIndex* pindexLast, const Consensus
         }
         std::sort(solveTimes.begin(), solveTimes.end());
         rollingSolveTime = solveTimes[solveTimes.size() / 2];
-        LogPrintf("🌀 DGW3-NOVA Rolling median solve time = %ds\n", rollingSolveTime);
+        LogPrint(BCLog::VALIDATION,"🌀 DGW3-NOVA Rolling median solve time = %ds\n", rollingSolveTime);
     }
 
     // Trigger emergency logic BEFORE clamping
     bool triggered = v9 ? (actualSolveTime < 2 * minSolveTime && unclampedActualTimespan < targetTimespan / 6) : (actualSolveTime < minSolveTime || unclampedActualTimespan < targetTimespan / 6);
 
     if (triggered && nextHeight >= params.nextDifficultyFork3Height) {
-        LogPrintf("🚨 [DGW3%s] Emergency/min solve triggered. Solve=%ds Timespan=%ds\n",
+        LogPrint(BCLog::VALIDATION,"🚨 [DGW3%s] Emergency/min solve triggered. Solve=%ds Timespan=%ds\n",
                 v9 ? "-NOVA" : "", actualSolveTime, unclampedActualTimespan);
         actualTimespan = std::min(actualTimespan, std::min(emergencyClamp, minSolveClamp));
     }
@@ -200,7 +200,7 @@ unsigned int DarkGravityWave3Nova(const CBlockIndex* pindexLast, const Consensus
             if (actualTimespan < minTimespanClamp) actualTimespan = minTimespanClamp;
             if (actualTimespan > maxTimespanClamp) actualTimespan = maxTimespanClamp;
         } else {
-            LogPrintf("🛡️ DGW3-NOVA Emergency trigger at height %d: skipping normal clamps\n", nextHeight);
+            LogPrint(BCLog::VALIDATION,"🛡️ DGW3-NOVA Emergency trigger at height %d: skipping normal clamps\n", nextHeight);
         }
     } else {
         if (actualTimespan < minTimespanClamp) actualTimespan = minTimespanClamp;
@@ -215,7 +215,7 @@ unsigned int DarkGravityWave3Nova(const CBlockIndex* pindexLast, const Consensus
         double decayLimit = 2.0;
         decayFactor = std::pow(multiplier, decayExponent);
         decayFactor = std::min(decayFactor, decayLimit);
-        LogPrintf("📉 DGW3-NOVA graceful decay (v9) applied: factor=%.2f (solve=%ds)\n", decayFactor, actualSolveTime);
+        LogPrint(BCLog::VALIDATION,"📉 DGW3-NOVA graceful decay (v9) applied: factor=%.2f (solve=%ds)\n", decayFactor, actualSolveTime);
     } 
 
     // Median smoothing of pastDifficultyAverage (Fork 9)
@@ -232,7 +232,7 @@ unsigned int DarkGravityWave3Nova(const CBlockIndex* pindexLast, const Consensus
         }
         std::sort(pastDiffs.begin(), pastDiffs.end());
         difficultySmoothing = pastDiffs[pastDiffs.size() / 2];
-        LogPrintf("📊 DGW3-NOVA Difficulty median smoothing active\n");
+        LogPrint(BCLog::VALIDATION,"📊 DGW3-NOVA Difficulty median smoothing active\n");
     }
 
     // Final difficulty calculation with asymmetry
@@ -242,7 +242,7 @@ unsigned int DarkGravityWave3Nova(const CBlockIndex* pindexLast, const Consensus
     if (nextHeight >= v9 && decayFactor > 1.0) {
         arith_uint256 diffToPrevious = baseline > difficultySmoothing ? (baseline - difficultySmoothing) : 0;
         newDifficulty = baseline - (diffToPrevious / decayFactor);
-        LogPrintf("🪂 DGW3-NOVA decay-from-baseline: newDifficulty=%.8f\n", newDifficulty.getdouble());
+        LogPrint(BCLog::VALIDATION,"🪂 DGW3-NOVA decay-from-baseline: newDifficulty=%.8f\n", newDifficulty.getdouble());
     }
 
     arith_uint256 bnPowLimit = UintToArith256(GetPowLimitForHeight(nextHeight, params));
@@ -261,7 +261,7 @@ unsigned int DarkGravityWave3Nova(const CBlockIndex* pindexLast, const Consensus
         if (newDifficulty > yespowerCap) newDifficulty = yespowerCap;
     }
 
-    LogPrintf("⛏️ Retargeting at height=%d with DGW3-NOVA\n", pindexLast->nHeight);
+    LogPrint(BCLog::VALIDATION,"⛏️ Retargeting at height=%d with DGW3-NOVA\n", pindexLast->nHeight);
     return newDifficulty.GetCompact();
 }
 
@@ -271,11 +271,11 @@ unsigned int DarkGravityWave3(const CBlockIndex* pindexLast, const Consensus::Pa
     const int nPastBlocks = 24;
     int nextHeight = (pindexLast ? pindexLast->nHeight + 1 : 0);
     
-    LogPrintf("💡 DGW3: nHeight=%d returning powLimit %s\n", nextHeight,
+    LogPrint(BCLog::VALIDATION,"💡 DGW3: nHeight=%d returning powLimit %s\n", nextHeight,
         IsPostSha256Fork(nextHeight, params) ? "SHA256 (post-fork)"
         : (nextHeight >= params.yespowerForkHeight ? "Yespower" : "SHA256"));
     arith_uint256 limit = UintToArith256(GetPowLimitForHeight(nextHeight, params));
-    LogPrintf("💡 DGW3: powLimit used = %s\n", limit.ToString());
+    LogPrint(BCLog::VALIDATION,"💡 DGW3: powLimit used = %s\n", limit.ToString());
     if (nextHeight < nPastBlocks)
         return limit.GetCompact();
 
@@ -328,7 +328,7 @@ unsigned int DarkGravityWave3(const CBlockIndex* pindexLast, const Consensus::Pa
         if (newDifficulty > yespowerCap) newDifficulty = yespowerCap;
     }
 
-    LogPrintf("⛏️ Retargeting at height=%d with DGW3\n", pindexLast->nHeight);
+    LogPrint(BCLog::VALIDATION,"⛏️ Retargeting at height=%d with DGW3\n", pindexLast->nHeight);
 
     return newDifficulty.GetCompact();
 }
@@ -355,7 +355,7 @@ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nF
     if (bnNew > bnPowLimit)
         bnNew = bnPowLimit;
     
-    LogPrintf("CalculateNextWorkRequired: nBits=%08x, target=%s\n",
+    LogPrint(BCLog::VALIDATION,"CalculateNextWorkRequired: nBits=%08x, target=%s\n",
               bnNew.GetCompact(), bnNew.ToString());
     
     return bnNew.GetCompact();
@@ -376,7 +376,7 @@ unsigned int Lwma3(const CBlockIndex* pindexLast, const Consensus::Params& param
 
     // Prevent division by zero at fork
     if (pindexLast->nHeight + 1 < params.nextDifficultyForkHeight + N) {
-        LogPrintf("🧪 Not enough history for LWMA3, returning powLimit\n");
+        LogPrint(BCLog::VALIDATION,"🧪 Not enough history for LWMA3, returning powLimit\n");
         return bnPowLimit.GetCompact();
     }
 
@@ -396,7 +396,7 @@ unsigned int Lwma3(const CBlockIndex* pindexLast, const Consensus::Params& param
     }
 
     if (t <= 0) {
-        LogPrintf("⚠️ Bad LWMA3 t <= 0, fallback to powLimit\n");
+        LogPrint(BCLog::VALIDATION,"⚠️ Bad LWMA3 t <= 0, fallback to powLimit\n");
         return bnPowLimit.GetCompact();
     }
 
@@ -404,7 +404,7 @@ unsigned int Lwma3(const CBlockIndex* pindexLast, const Consensus::Params& param
     if (nextTarget > bnPowLimit)
         nextTarget = bnPowLimit;
 
-    LogPrintf("⛏️ LWMA3: height=%d target=%s\n", pindexLast->nHeight + 1, nextTarget.ToString());
+    LogPrint(BCLog::VALIDATION,"⛏️ LWMA3: height=%d target=%s\n", pindexLast->nHeight + 1, nextTarget.ToString());
     return nextTarget.GetCompact();
 }
 
@@ -414,16 +414,16 @@ bool CheckProofOfWorkWithHeight(uint256 hash, CBlockHeader block, unsigned int n
     bool fOverflow;
     arith_uint256 bnTarget;
 
-    LogPrintf("💡 CheckProofOfWorkWithHeight: nHeight=%d prevBlockTime=%d\n", nHeight, (int)prevBlockTime);
+    LogPrint(BCLog::VALIDATION,"💡 CheckProofOfWorkWithHeight: nHeight=%d prevBlockTime=%d\n", nHeight, (int)prevBlockTime);
     bnTarget.SetCompact(nBits, &fNegative, &fOverflow);
 
     if (nHeight == 0 || hash == params.hashGenesisBlock) {
-        LogPrintf("🧱 Skipping PoW check for genesis block\n");
+        LogPrint(BCLog::VALIDATION,"🧱 Skipping PoW check for genesis block\n");
         return true;
     }
 
     if (fNegative || fOverflow || bnTarget == 0) {
-        LogPrintf("❌ Legacy block rejected: bad nBits or target too easy\n");
+        LogPrint(BCLog::VALIDATION,"❌ Legacy block rejected: bad nBits or target too easy\n");
         return false;
     }
 
@@ -445,14 +445,14 @@ bool CheckProofOfWorkWithHeight(uint256 hash, CBlockHeader block, unsigned int n
         const arith_uint256 yespowerLimit = UintToArith256(params.powLimitYespower);
 
         if (bnTarget > yespowerLimit) {
-            LogPrintf("❌ Post-reactivation block rejected: target above yespower powLimit\n");
+            LogPrint(BCLog::VALIDATION,"❌ Post-reactivation block rejected: target above yespower powLimit\n");
             return false;
         }
 
         const bool grace     = IsYespowerGraceActive(nHeight, params);
         const bool emergency = IsEmergencyArmed((int64_t)block.nTime, prevBlockTime, params);
         const bool yespowerAllowed = grace || emergency;
-        LogPrintf("🔁 Dual-PoW @%d: SHA256 always-on%s%s (gap=%lds, threshold=%lds, graceEnds=%d)\n",
+        LogPrint(BCLog::VALIDATION,"🔁 Dual-PoW @%d: SHA256 always-on%s%s (gap=%lds, threshold=%lds, graceEnds=%d)\n",
                   nHeight,
                   grace     ? " + Yespower (grace window)" : "",
                   (!grace && emergency) ? " + Yespower (emergency)" : "",
@@ -479,17 +479,17 @@ bool CheckProofOfWorkWithHeight(uint256 hash, CBlockHeader block, unsigned int n
         // declared minimum difficulty.
         (void)sha256Limit; // retained for potential future use
         if (UintToArith256(hash) <= bnTarget) {
-            LogPrintf("📏 SHA256 hash <= target ✅\n");
+            LogPrint(BCLog::VALIDATION,"📏 SHA256 hash <= target ✅\n");
             return true;
         }
 
         // ---- Yespower path: open during grace window, or armed via emergency timeout ----
         if (yespowerAllowed) {
-            LogPrintf("🛟 Trying Yespower (%s)\n", grace ? "grace window" : "emergency fallback");
+            LogPrint(BCLog::VALIDATION,"🛟 Trying Yespower (%s)\n", grace ? "grace window" : "emergency fallback");
             return CheckYespower(block, bnTarget, nHeight);
         }
 
-        LogPrintf("📏 SHA256 hash <= target ❌ (Yespower not allowed: no grace, no emergency)\n");
+        LogPrint(BCLog::VALIDATION,"📏 SHA256 hash <= target ❌ (Yespower not allowed: no grace, no emergency)\n");
         return false;
     }
 
@@ -497,16 +497,16 @@ bool CheckProofOfWorkWithHeight(uint256 hash, CBlockHeader block, unsigned int n
     // PRE-REACTIVATION: original Yespower path (historical chain).
     // -----------------------------------------------------------------------
     if (nHeight >= 1) {
-        LogPrintf("⚡ Using Yespower at height %d\n", nHeight);
+        LogPrint(BCLog::VALIDATION,"⚡ Using Yespower at height %d\n", nHeight);
         if (nHeight == 1) {
             return true;
         }
-        LogPrintf("🧮 Computed hash: %s\n", hash.ToString());
-        LogPrintf("🎯 Target:        %s\n", bnTarget.ToString());
-        LogPrintf("📏 Comparison:    hash <= target ? %s\n", (UintToArith256(hash) <= bnTarget) ? "✅ YES" : "❌ NO");
+        LogPrint(BCLog::VALIDATION,"🧮 Computed hash: %s\n", hash.ToString());
+        LogPrint(BCLog::VALIDATION,"🎯 Target:        %s\n", bnTarget.ToString());
+        LogPrint(BCLog::VALIDATION,"📏 Comparison:    hash <= target ? %s\n", (UintToArith256(hash) <= bnTarget) ? "✅ YES" : "❌ NO");
         return CheckYespower(block, bnTarget, nHeight);
     } else {
-        LogPrintf("🔒 Using SHA256 at height %d\n", nHeight);
+        LogPrint(BCLog::VALIDATION,"🔒 Using SHA256 at height %d\n", nHeight);
         uint256 b_hash = block.GetHash(); // SHA256
         return UintToArith256(b_hash) <= bnTarget;
     }
@@ -517,10 +517,10 @@ bool CheckProofOfWork(uint256 hash, const CBlockHeader& blockHeader, unsigned in
     const char* algoTag = IsPostSha256Fork(nHeight, params)
                               ? "SHA256 (post-reactivation, Yespower fallback when stalled)"
                               : ((nHeight >= params.yespowerForkHeight) ? "Yespower" : "SHA256");
-    LogPrintf("🚧 CheckPoW height=%d, using: %s\n", nHeight, algoTag);
+    LogPrint(BCLog::VALIDATION,"🚧 CheckPoW height=%d, using: %s\n", nHeight, algoTag);
 
     if (nHeight == 0) {
-        LogPrintf("🧱 Skipping PoW check for genesis block\n");
+        LogPrint(BCLog::VALIDATION,"🧱 Skipping PoW check for genesis block\n");
         return true;
     }
 
