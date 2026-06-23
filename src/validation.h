@@ -76,6 +76,12 @@ static const int64_t DEFAULT_MAX_TIP_AGE = 24 * 60 * 60;
  *  Bounds how much dirty UTXO a clean shutdown must write — and how much an
  *  unclean exit loses — at the cost of some write amplification. */
 static const int64_t DEFAULT_BLOCK_FLUSH_WINDOW = 0;
+/** Default for -verifynedb: the full-store NEDB integrity scan is OFF by default.
+ *  Integrity rests on content-addressed read-time verification (every object read
+ *  re-hashes and fails on mismatch), the warm-boot tip/window/genesis load, the
+ *  Proof-of-Prefix peer seam, and Core's own VerifyDB over the last blocks. Enable
+ *  -verifynedb for an eager full-store re-hash (e.g. after suspected disk corruption). */
+static const bool DEFAULT_VERIFY_NEDB = false;
 static const bool DEFAULT_CHECKPOINTS_ENABLED = true;
 static const bool DEFAULT_TXINDEX = false;
 static const char* const DEFAULT_BLOCKFILTERINDEX = "0";
