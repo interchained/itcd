@@ -44,19 +44,24 @@ Assertion failed: pa == pb, file chain.cpp, line 177
 
 Node B (compiled today) trusts its NEDB-persisted tip only after a two-part proof:
 
-1. **Local integrity — NEDB native `verify()`.** `nedb-ffi` exposes
-   `nedb_verify()` → `Db::verify()`; `CDBWrapper::Verify()` wraps it. `init.cpp`
-   runs it at startup before warm boot. It walks the content-addressed objects
-   and confirms each still hashes to its address — the storage-layer equivalent
-   of replaying and re-hashing the chain, but native and near-instant. Problems
-   found → wipe index, resync from height 0.
+1. **Local integrity — content-addressed, read-time by default.** NEDB objects
+   are content-addressed: every read re-hashes the bytes and fails loud on a
+   mismatch (`nedb-v2/src/store.rs::read`), so a tampered/corrupt object can never
+   be silently served — it is caught the moment it is touched. The warm-boot
+   tip/window/genesis load and chainstate replay therefore self-verify what the
+   node resumes from, and anything read later self-verifies too. The eager
+   full-store re-hash (`nedb_verify()` → `Db::verify()`, wrapped by
+   `CDBWrapper::Verify()`) is O(n) — minutes at scale — and is **OFF by default**;
+   pass **`-verifynedb`** to run it at startup (e.g. after suspected on-disk
+   corruption), in which case problems found → wipe index, resync from height 0.
+   Core's own `VerifyDB` over the last blocks still runs regardless.
 2. **Canonical proof — seam against the seed anchor (Node A).** On mainnet the
    anchor `seed.interchained.org:17101` is pinned as a persistent added node.
    `ProcessHeadersMessage` closes the seam the moment a peer's canonical chain
    is shown to contain our tip (it extends our tip, or its range includes our
-   tip hash). Because `verify()` proved base..tip is an intact BLAKE2b-linked
-   chain, confirming the **tip** is canonical proves the whole prefix by the
-   back-links — we do not re-compare every block.
+   tip hash). Because the loaded base..tip window is an intact BLAKE2b-linked
+   chain (every header self-verified on read), confirming the **tip** is canonical
+   proves the whole prefix by the back-links — we do not re-compare every block.
 
 `g_warm_boot_active` now stays true from a successful `TryWarmBoot` **until the
 seam verifies** (then it is cleared in `net_processing`). While active, the NEDB

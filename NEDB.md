@@ -179,13 +179,17 @@ Node A  — seed.interchained.org:17101, online since genesis (the canonical cha
 Node B  — compiled today, has blocks 0..T persisted in NEDB
 ```
 
-**Step 1 — Local integrity (instant, native).**
-`Db::verify()` (exposed as `nedb_verify()` → `CDBWrapper::Verify()`) walks the
-content-addressed objects and confirms each still hashes to its BLAKE2b address.
-This proves Node B's `base..T` window is an intact, untampered, hash-linked
-chain — without deserializing a single block or re-running a single script. If
-verification fails, Node B cannot trust its store: it wipes the index and
-resyncs from height 0.
+**Step 1 — Local integrity (content-addressed, read-time by default).**
+NEDB objects are content-addressed: every read re-hashes the bytes and fails
+loud on a BLAKE2b mismatch (`nedb-v2/src/store.rs::read`), so a tampered or
+corrupt object can never be silently served — it is caught the instant it is
+touched. Loading Node B's `base..T` window (and replaying its chainstate) thus
+self-verifies what the node resumes from, with no separate scan. The eager
+full-store re-hash — `Db::verify()` (exposed as `nedb_verify()` →
+`CDBWrapper::Verify()`), which walks every object and confirms each still hashes
+to its address — is O(n) and **OFF by default**; run it with **`-verifynedb`**
+(e.g. after suspected on-disk corruption), in which case a failure wipes the
+index and resyncs from height 0.
 
 **Step 2 — Canonical seam (one comparison).**
 Node B pins Node A as a persistent peer and confirms A's canonical chain

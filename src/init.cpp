@@ -418,6 +418,7 @@ void SetupServerArgs(NodeContext& node)
     argsman.AddArg("-dbbatchsize", strprintf("Maximum database write batch size in bytes (default: %u)", nDefaultDbBatchSize), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-dbcache=<n>", strprintf("Maximum database cache size <n> MiB (%d to %d, default: %d). In addition, unused mempool memory is shared for this cache (see -maxmempool).", nMinDbCache, nMaxDbCache, nDefaultDbCache), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-flushwindow=<n>", strprintf("Force a full chainstate flush every <n> connected blocks during sync, bounding how much dirty UTXO a clean shutdown must write (and how much an unclean exit loses), at the cost of some write amplification. 0 = disabled, rely only on the cache-size/time triggers (default: %d).", DEFAULT_BLOCK_FLUSH_WINDOW), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-verifynedb", strprintf("Run an eager full-store NEDB integrity scan at startup (re-hashes every content-addressed object — O(n), can take minutes at scale). Off by default: integrity is enforced lazily by content-addressed read verification, the warm-boot window load, the Proof-of-Prefix peer seam, and the standard last-blocks VerifyDB. Enable after suspected on-disk corruption (default: %u).", DEFAULT_VERIFY_NEDB), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-debuglogfile=<file>", strprintf("Specify location of debug log file. Relative paths will be prefixed by a net-specific datadir location. (-nodebuglogfile to disable; default: %s)", DEFAULT_DEBUGLOGFILE), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-feefilter", strprintf("Tell other nodes to filter invs to us by our mempool min fee (default: %u)", DEFAULT_FEEFILTER), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-includeconf=<file>", "Specify additional configuration file, relative to the -datadir path (only useable from configuration file, not command line)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1662,16 +1663,22 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                         pblocktree->WriteFlag("nedb_warmboot_unconfirmed", false); // consume the flag
                     }
 
-                    // The full-store NEDB verify is O(n) — tens of seconds at scale
-                    // — so only run it when it's actually needed: after an UNCLEAN
-                    // exit. A graceful shutdown sets "nedb_clean_shutdown"=true; we
-                    // read it, then immediately clear it (this run stays "dirty"
-                    // until we stop cleanly). Clean last exit => trust the store and
-                    // skip the scan; an unclean kill => verify (and wipe if bad).
+                    // The full-store NEDB verify re-hashes every object — O(n), tens
+                    // of MINUTES at scale — and is OFF by default (enable -verifynedb).
+                    // By default, integrity rests on: content-addressed read-time
+                    // verification (every object read re-hashes and fails loud on
+                    // mismatch), the warm-boot tip/window/genesis load, the
+                    // Proof-of-Prefix peer seam, and Core's own VerifyDB over the last
+                    // blocks. Enable -verifynedb for an eager full-store scrub (e.g.
+                    // after suspected on-disk corruption); when enabled it still
+                    // respects a clean shutdown and -reindex/-reindex-chainstate.
+                    // The clean-shutdown flag is consumed every start (this run stays
+                    // "dirty" until it stops cleanly).
                     bool clean_shutdown = false;
                     pblocktree->ReadFlag("nedb_clean_shutdown", clean_shutdown);
                     pblocktree->WriteFlag("nedb_clean_shutdown", false);
-                    const bool want_verify = !fReset && !fReindex && !clean_shutdown;
+                    const bool verify_requested = gArgs.GetBoolArg("-verifynedb", DEFAULT_VERIFY_NEDB);
+                    const bool want_verify = verify_requested && !fReset && !fReindex && !fReindexChainState && !clean_shutdown;
                     const int64_t t_verify0 = GetTimeMillis();
                     const int nedb_problems = want_verify ? pblocktree->Verify() : -1;
                     if (nedb_problems > 0) {
@@ -1685,7 +1692,10 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                                       (int)(GetTimeMillis() - t_verify0),
                                       pblocktree->GetStateRoot().substr(0, 16));
                         } else if (!fReset && !fReindex) {
-                            LogPrintf("NEDB integrity: clean shutdown — skipping the O(n) integrity scan.\n");
+                            if (verify_requested)
+                                LogPrintf("NEDB integrity: clean shutdown — skipping the -verifynedb scan.\n");
+                            else
+                                LogPrintf("NEDB integrity: deep verify off by default (enable with -verifynedb); trusting content-addressed reads + warm-boot window + peer seam.\n");
                         }
                         // Skip warm boot under -reindex-chainstate too: it wipes
                         // the chainstate, so the persisted tip can't be resumed —
