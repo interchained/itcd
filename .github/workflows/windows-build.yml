@@ -183,8 +183,9 @@ jobs:
           echo "LIBS += -lboost_thread-mt -lboost_chrono-mt -lboost_filesystem-mt -lws2_32 -lbcrypt -luserenv -lsodium" \
             >> src/Makefile
 
-          make -j"$J"
+          make -j"$J" src/interchainedd.exe src/interchained-cli.exe
           test -f src/interchainedd.exe && file src/interchainedd.exe
+          test -f src/interchained-cli.exe && file src/interchained-cli.exe
 
       - name: Package Windows binary
         run: |

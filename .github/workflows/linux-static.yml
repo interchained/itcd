@@ -224,7 +224,7 @@ jobs:
           grep '^interchainedd_LDADD = .*--start-group.*libnedb_ffi\.a.*--end-group' src/Makefile
           grep '^interchained_wallet_LDADD = .*--start-group.*libnedb_ffi\.a.*--end-group' src/Makefile
 
-          make -j"$JOBS"
+          make -j"$JOBS" "$D_BIN" "$CLI_BIN"
           test -f "$D_BIN" && test -f "$CLI_BIN"
 
       - name: Verify it will run on Ubuntu (no musl interpreter)
