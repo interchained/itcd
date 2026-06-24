@@ -373,17 +373,43 @@ pub extern "C" fn nedb_batch_write(handle: *mut NedbHandle, ops: *const NedbOp, 
         // Copy key/value bytes into owned buffers first. The raw C pointers are
         // not Send, so they cannot be touched from rayon worker threads; the
         // owned Vecs can.
-        let mut puts_raw: Vec<(String, Vec<u8>)> = Vec::with_capacity(ops_slice.len());
-        let mut del_ids:  Vec<String>            = Vec::new();
+        //
+        // CRITICAL — LevelDB batch semantics: operations apply IN ORDER and the
+        // LAST op on a given key wins. CCoinsViewDB::BatchWrite depends on this:
+        // in ONE batch it both Erases AND Writes the 2-phase-commit marker keys
+        // (DB_BEST_BLOCK 'B', DB_HEAD_BLOCKS 'H') — Erase(B)+Write(H) … then
+        // Erase(H)+Write(B). The earlier implementation split the batch into an
+        // all-deletes pass followed by an all-puts pass, which made the PUT win
+        // for both keys regardless of their true order — so DB_HEAD_BLOCKS stayed
+        // populated when it should have been erased. That desynced the chainstate
+        // commit markers and produced the BatchWrite (txdb.cpp:95) abort and the
+        // downstream FindMostWorkChain (validation.cpp:2797) abort. Fix: collapse
+        // the batch to net per-key state in op order (a later op supersedes an
+        // earlier one). After this every key lands in exactly one of the
+        // delete/put sets, so the two passes can never race on the same key.
+        let mut idx: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::with_capacity(ops_slice.len());
+        let mut resolved: Vec<(String, Option<Vec<u8>>)> = Vec::with_capacity(ops_slice.len());
         for op in ops_slice {
             if op.key.is_null() { continue; }
             let k   = unsafe { std::slice::from_raw_parts(op.key, op.key_len) };
             let kid = hex::encode(k);
-            if op.value.is_null() {
-                del_ids.push(kid);
+            let val = if op.value.is_null() {
+                None
             } else {
-                let v = unsafe { std::slice::from_raw_parts(op.value, op.value_len) }.to_vec();
-                puts_raw.push((kid, v));
+                Some(unsafe { std::slice::from_raw_parts(op.value, op.value_len) }.to_vec())
+            };
+            match idx.get(&kid) {
+                Some(&i) => resolved[i].1 = val,                 // same key again → last op wins
+                None     => { idx.insert(kid.clone(), resolved.len()); resolved.push((kid, val)); }
+            }
+        }
+        let mut puts_raw: Vec<(String, Vec<u8>)> = Vec::with_capacity(resolved.len());
+        let mut del_ids:  Vec<String>            = Vec::new();
+        for (kid, val) in resolved {
+            match val {
+                Some(v) => puts_raw.push((kid, v)),
+                None    => del_ids.push(kid),
             }
         }
 
@@ -402,8 +428,10 @@ pub extern "C" fn nedb_batch_write(handle: *mut NedbHandle, ops: *const NedbOp, 
                 (coll.to_string(), kid.clone(), json!({ "v": hex::encode(val) }), caused_by, None, None)
             }).collect();
 
-        // Deletes (spent coins) — tombstones. Parallelised too; distinct keys, no
-        // collision with the puts within a single chainstate flush.
+        // Deletes (spent coins) — tombstones. Parallelised too. Keys here are now
+        // guaranteed disjoint from the puts above (the batch was collapsed to net
+        // per-key state in op order), so the delete pass and the put pass can
+        // never operate on the same key.
         if !del_ids.is_empty() {
             del_ids.par_iter().for_each(|kid| { let _ = db.delete(coll, kid); });
         }

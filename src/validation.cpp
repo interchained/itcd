@@ -4526,6 +4526,22 @@ bool CChainState::TryWarmBoot(CBlockTreeDB& blocktree,
                 pindex->nChainTx = pindex->nTx;
             } else if (pindex->pprev->HaveTxsDownloaded()) {
                 pindex->nChainTx = pindex->pprev->nChainTx + pindex->nTx;
+            } else if (pindex->nStatus & BLOCK_HAVE_DATA) {
+                // Warm boot loads only a 2016-block window, so the oldest block's
+                // pprev is outside the window with nChainTx==0 — which, left alone,
+                // breaks propagation and leaves the WHOLE window with
+                // HaveTxsDownloaded()==false. Every block loaded here has its block
+                // data on disk (it was connected in a prior run), so seed a nonzero
+                // nChainTx to mark "txs present"; the loop is height-sorted, so once
+                // the window base is seeded the rest propagate normally above. The
+                // exact value is immaterial for consensus (nChainTx is only a
+                // have-txs predicate + for logging). Without this, if the chainstate
+                // sits behind the block-index tip (an interrupted-flush gap), the
+                // active tip is below the warm-boot candidate and FindMostWorkChain
+                // (validation.cpp:2797) walks these window blocks and asserts on
+                // HaveTxsDownloaded(). Seeding lets ActivateBestChain instead connect
+                // the gap forward from the chainstate tip — self-healing the split.
+                pindex->nChainTx = pindex->nTx;
             }
         }
         // Skip-pointer construction is intentionally omitted here.

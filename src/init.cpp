@@ -1602,12 +1602,22 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
     LogPrintf("* Using %.1f MiB for in-memory UTXO set (plus up to %.1f MiB of unused mempool space)\n", nCoinCacheUsage * (1.0 / 1024 / 1024), nMempoolSizeMax * (1.0 / 1024 / 1024));
 
     bool fLoaded = false;
+    // One-shot guard for chainstate self-heal: if a recoverable chainstate-init
+    // failure (replay / tip load) occurs, automatically retry ONCE with
+    // -reindex-chainstate (rebuild the UTXO from the block index) before falling
+    // back to the manual rebuild prompt. The guard prevents an infinite loop if
+    // the rebuild itself fails.
+    bool auto_reindexed_chainstate = false;
     while (!fLoaded && !ShutdownRequested()) {
         bool fReset = fReindex;
         auto is_coinsview_empty = [&](CChainState* chainstate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
             return fReset || fReindexChainState || chainstate->CoinsTip().GetBestBlock().IsNull();
         };
         bilingual_str strLoadError;
+        // Set true when the failure is a recoverable chainstate-init problem (block
+        // replay or active-tip load) that -reindex-chainstate can repair from the
+        // block index without a full resync.
+        bool chainstate_needs_rebuild = false;
 
         uiInterface.InitMessage(_("Loading block index...").translated);
 
@@ -1786,6 +1796,7 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                     if (!chainstate->ReplayBlocks(chainparams)) {
                         strLoadError = _("Unable to replay blocks. You will need to rebuild the database using -reindex-chainstate.");
                         failed_chainstate_init = true;
+                        chainstate_needs_rebuild = true;
                         break;
                     }
                     LogPrintf("Chainstate init: replay completed in %dms\n",
@@ -1806,6 +1817,7 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                         if (!chainstate->LoadChainTip(chainparams)) {
                             strLoadError = _("Error initializing block database");
                             failed_chainstate_init = true;
+                            chainstate_needs_rebuild = true;
                             break; // out of the per-chainstate loop
                         }
                         LogPrintf("Chainstate init: active chain tip loaded in %dms\n",
@@ -1903,7 +1915,22 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
         } while(false);
 
         if (!fLoaded && !ShutdownRequested()) {
-            // first suggest a reindex
+            // Self-heal first: a recoverable chainstate-init failure (e.g. the
+            // chainstate sits behind the block-index tip after an interrupted
+            // flush) is repaired by rebuilding just the UTXO set from the block
+            // index. Retry ONCE automatically with -reindex-chainstate before
+            // bothering the operator — no full resync, bounded by local block data,
+            // and ConnectBlock re-validates every block so this cannot mask real
+            // corruption (a genuinely bad block fails the rebuild and the one-shot
+            // guard falls through to the prompt below).
+            if (chainstate_needs_rebuild && !fReset && !fReindexChainState && !auto_reindexed_chainstate) {
+                auto_reindexed_chainstate = true;
+                fReindexChainState = true;
+                LogPrintf("Chainstate self-heal: %s — retrying once automatically with -reindex-chainstate (rebuild the UTXO set from the block index; no resync).\n",
+                          strLoadError.original);
+                continue;
+            }
+            // otherwise, suggest a reindex
             if (!fReset) {
                 bool fRet = uiInterface.ThreadSafeQuestion(
                     strLoadError + Untranslated(".\n\n") + _("Do you want to rebuild the block database now?"),
