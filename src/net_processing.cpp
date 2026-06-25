@@ -1827,7 +1827,7 @@ void PeerManager::ProcessHeadersMessage(CNode& pfrom, const std::vector<CBlockHe
     //
     // Runs only while warm boot is active and unverified; ignored on full scans.
     if (g_warm_boot_active.load() && !g_warm_boot_verified.load() &&
-        !g_warm_boot_tip_hash.IsNull())
+        !g_warm_boot_anchor.load() && !g_warm_boot_tip_hash.IsNull())
     {
         bool seam_closed = (headers[0].hashPrevBlock == g_warm_boot_tip_hash);
         if (!seam_closed) {
@@ -1940,8 +1940,14 @@ void PeerManager::ProcessHeadersMessage(CNode& pfrom, const std::vector<CBlockHe
         // safety doctrine; we only act on proof immediately instead of waiting out
         // the 2-minute watchdog. GetAncestor() returns null if the peer's chain is
         // not linked down to our tip height, in which case we draw no conclusion.
+        // Anchor nodes are excluded: a declared root of trust does not defer to a
+        // peer about its own canonical tip (it has no external seam by definition),
+        // so a peer must never be able to flag a seed's tip for resync — that would
+        // be a DoS on exactly the nodes -anchor protects. Mirrors the seam-verify
+        // gate above, which also skips anchors.
         if (g_warm_boot_active.load() && !g_warm_boot_verified.load() &&
-            !g_warm_boot_mismatch.load() && !g_warm_boot_tip_hash.IsNull() &&
+            !g_warm_boot_anchor.load() && !g_warm_boot_mismatch.load() &&
+            !g_warm_boot_tip_hash.IsNull() &&
             pindexLast->nHeight >= g_warm_boot_tip_height &&
             pindexLast->nChainWork > g_warm_boot_tip_chainwork)
         {

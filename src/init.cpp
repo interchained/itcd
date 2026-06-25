@@ -420,6 +420,7 @@ void SetupServerArgs(NodeContext& node)
     argsman.AddArg("-flushwindow=<n>", strprintf("Force a full chainstate flush every <n> connected blocks during sync, bounding how much dirty UTXO a clean shutdown must write (and how much an unclean exit loses), at the cost of some write amplification. 0 = disabled, rely only on the cache-size/time triggers (default: %d).", DEFAULT_BLOCK_FLUSH_WINDOW), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-coinprefetch", strprintf("During initial block download, batch-read every input coin a block spends from NEDB in one parallel lookup before validating it, instead of faulting them in one-by-one. Pure read-side sync optimization — the connected chainstate is byte-identical (default: %u).", DEFAULT_COIN_PREFETCH), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-verifynedb", strprintf("Run an eager full-store NEDB integrity scan at startup (re-hashes every content-addressed object — O(n), can take minutes at scale). Off by default: integrity is enforced lazily by content-addressed read verification, the warm-boot window load, the Proof-of-Prefix peer seam, and the standard last-blocks VerifyDB. Enable after suspected on-disk corruption (default: %u).", DEFAULT_VERIFY_NEDB), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-anchor", "Run as a root-of-trust anchor/seed node: on warm boot, trust the local NEDB tip and proceed without awaiting an external Proof-of-Prefix seam. For the canonical seed(s) — which have no external peer above their tip to close the seam (and self-connections are dropped), so the seam can never close for them. Integrity still rests on content-addressed read verification, the warm-boot window, and -verifynedb. Setting this only makes THIS node trust its own local tip; it does NOT make the network trust it. Default: off.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-debuglogfile=<file>", strprintf("Specify location of debug log file. Relative paths will be prefixed by a net-specific datadir location. (-nodebuglogfile to disable; default: %s)", DEFAULT_DEBUGLOGFILE), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-feefilter", strprintf("Tell other nodes to filter invs to us by our mempool min fee (default: %u)", DEFAULT_FEEFILTER), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-includeconf=<file>", "Specify additional configuration file, relative to the -datadir path (only useable from configuration file, not command line)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -769,7 +770,7 @@ static void ThreadImport(ChainstateManager& chainman, std::vector<fs::path> vImp
         // raw block data has not arrived from peers yet. Calling ActivateBestChain
         // would cause ReadBlockFromDisk to fail fatally.  Skip the startup scan —
         // the IBD loop handles activation as block data arrives from peers.
-        if (g_warm_boot_active) {
+        if (g_warm_boot_active && !g_warm_boot_verified && !g_warm_boot_anchor) {
             LogPrintf("Warm boot active: skipping startup ActivateBestChain scan — awaiting NEDB Proof-of-Prefix seam verification from the seed anchor.\n");
             // Do NOT clear g_warm_boot_active here. It must stay active so the
             // NEDB on-demand ancestor loader keeps serving GetAncestor from the
@@ -1724,6 +1725,23 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
 
                     if (warm_ok) {
                         g_warm_boot_active = true;
+                        // Anchor/seed mode: this node is a declared root of trust.
+                        // It has no external peer above its tip to close the
+                        // Proof-of-Prefix seam (and self-connections are dropped),
+                        // so trust the local NEDB tip directly. g_warm_boot_active
+                        // stays true so the on-demand ancestor loader keeps serving
+                        // GetAncestor during ActivateBestChain; the dedicated
+                        // g_warm_boot_anchor flag releases the startup ABC gate
+                        // (below) and stops the watchdog from demoting a good tip,
+                        // while g_warm_boot_verified stays strictly seam-confirmed.
+                        // Integrity is still enforced by content-addressed reads +
+                        // the warm-boot window + -verifynedb. Self-declaring -anchor
+                        // only trusts THIS node's own tip; the network's anchor stays
+                        // the hard-coded seed, so it adds no network attack surface.
+                        if (gArgs.GetBoolArg("-anchor", false)) {
+                            g_warm_boot_anchor.store(true);
+                            LogPrintf("Anchor mode (-anchor): root-of-trust node — trusting the local NEDB tip without an external Proof-of-Prefix seam.\n");
+                        }
                     } else {
                         if (!chainman.LoadBlockIndex(chainparams)) {
                             if (ShutdownRequested()) break;
@@ -2190,7 +2208,7 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
     // height 0 instead of warm boot. If the seam verified first, this is a no-op.
     if (g_warm_boot_active.load()) {
         node.scheduler->scheduleFromNow([]{
-            if (g_warm_boot_active.load() && !g_warm_boot_verified.load()) {
+            if (g_warm_boot_active.load() && !g_warm_boot_verified.load() && !g_warm_boot_anchor.load()) {
                 LogPrintf("WarmBoot WATCHDOG: NEDB Proof-of-Prefix NOT confirmed within deadline — the seed anchor never extended our tip %s @ %d. Marking for a full resync from height 0 on next start.\n",
                           g_warm_boot_tip_hash.GetHex().substr(0, 16),
                           g_warm_boot_tip_height);

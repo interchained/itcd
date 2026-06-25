@@ -147,6 +147,7 @@ int               g_warm_boot_tip_height{0};    // height of the warm-boot tip
 arith_uint256     g_warm_boot_tip_chainwork;    // cumulative work of the warm-boot tip (persisted value)
 std::atomic<bool> g_warm_boot_verified{false}; // set when the canonical-chain seam closes
 std::atomic<bool> g_warm_boot_mismatch{false}; // set when a peer proves our tip is off the most-work chain
+std::atomic<bool> g_warm_boot_anchor{false};   // set by -anchor: this node is a root of trust (no external seam)
 bool fHavePruned = false;
 bool fPruneMode = false;
 bool fRequireStandard = true;

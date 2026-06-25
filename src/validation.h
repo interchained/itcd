@@ -162,6 +162,16 @@ extern std::atomic_bool fReindex;
  *                          absence of evidence): mismatch is positive proof and is
  *                          acted on at once (durable nedb_warmboot_unconfirmed flag
  *                          → full resync from 0 on the next controlled startup).
+ * g_warm_boot_anchor     — set true by -anchor: this node is a declared root of
+ *                          trust (a seed/anchor). It has no external peer above
+ *                          its tip to close the seam, so it trusts the local tip
+ *                          directly. The three warm-boot wait-guards (startup
+ *                          ActivateBestChain, the watchdog, and the seam check)
+ *                          treat `anchor` like a confirmed tip — EXCEPT it
+ *                          deliberately leaves g_warm_boot_active true, so the
+ *                          on-demand ancestor loader stays live. Distinct from
+ *                          g_warm_boot_verified, which means strictly "an external
+ *                          peer confirmed our tip via the seam."
  * g_warm_boot_tip_chainwork — cumulative work of the warm-boot tip (the persisted
  *                          value), so the seam can compare a peer's chain work
  *                          without a separate index lookup.
@@ -173,6 +183,7 @@ extern arith_uint256     g_warm_boot_tip_chainwork;
 extern std::atomic<bool> g_warm_boot_verified;
 extern std::atomic<bool> g_warm_boot_active;
 extern std::atomic<bool> g_warm_boot_mismatch;
+extern std::atomic<bool> g_warm_boot_anchor;
 
 /** Persist the durable "warm boot could not confirm the tip" flag
  *  (nedb_warmboot_unconfirmed) so the next startup full-scans from height 0.
