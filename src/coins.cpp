@@ -21,9 +21,25 @@ bool CCoinsView::HaveCoin(const COutPoint &outpoint) const
     return GetCoin(outpoint, coin);
 }
 
+void CCoinsView::BatchGetCoins(const std::vector<COutPoint>& outpoints,
+                               std::vector<Coin>& coins,
+                               std::vector<bool>& found) const
+{
+    // Default: no batch backend — fall back to N individual GetCoin() calls.
+    // Mirrors GetCoin() semantics exactly so overriding views can be swapped in
+    // transparently.
+    const size_t n = outpoints.size();
+    coins.assign(n, Coin());
+    found.assign(n, false);
+    for (size_t i = 0; i < n; ++i) {
+        found[i] = GetCoin(outpoints[i], coins[i]);
+    }
+}
+
 CCoinsViewBacked::CCoinsViewBacked(CCoinsView *viewIn) : base(viewIn) { }
 bool CCoinsViewBacked::GetCoin(const COutPoint &outpoint, Coin &coin) const { return base->GetCoin(outpoint, coin); }
 bool CCoinsViewBacked::HaveCoin(const COutPoint &outpoint) const { return base->HaveCoin(outpoint); }
+void CCoinsViewBacked::BatchGetCoins(const std::vector<COutPoint>& outpoints, std::vector<Coin>& coins, std::vector<bool>& found) const { base->BatchGetCoins(outpoints, coins, found); }
 uint256 CCoinsViewBacked::GetBestBlock() const { return base->GetBestBlock(); }
 std::vector<uint256> CCoinsViewBacked::GetHeadBlocks() const { return base->GetHeadBlocks(); }
 void CCoinsViewBacked::SetBackend(CCoinsView &viewIn) { base = &viewIn; }
@@ -135,6 +151,45 @@ const Coin& CCoinsViewCache::AccessCoin(const COutPoint &outpoint) const {
     } else {
         return it->second.coin;
     }
+}
+
+size_t CCoinsViewCache::PrefetchCoins(const std::vector<COutPoint>& outpoints) const {
+    // Collect the outpoints we don't already hold. An entry already in the
+    // cache — even a spent/dirty marker — is authoritative and must not be
+    // overwritten, exactly mirroring FetchCoin()'s first cache lookup.
+    std::vector<COutPoint> missing;
+    missing.reserve(outpoints.size());
+    for (const COutPoint& op : outpoints) {
+        if (cacheCoins.find(op) == cacheCoins.end()) {
+            missing.push_back(op);
+        }
+    }
+    if (missing.empty()) return 0;
+
+    // One batched (parallel, on the NEDB backend) read of every cold coin.
+    std::vector<Coin> fetched;
+    std::vector<bool> found;
+    base->BatchGetCoins(missing, fetched, found);
+
+    size_t cold = 0;
+    for (size_t i = 0; i < missing.size(); ++i) {
+        if (!found[i]) continue;
+        // A duplicated outpoint within `missing`, or one inserted on a prior
+        // iteration, may already be present — never double-insert.
+        if (cacheCoins.find(missing[i]) != cacheCoins.end()) continue;
+        // Insert exactly as FetchCoin() would: a clean (non-DIRTY) entry, marked
+        // FRESH only when the parent holds nothing but an empty/spent marker.
+        CCoinsMap::iterator ret = cacheCoins.emplace(
+            std::piecewise_construct,
+            std::forward_as_tuple(missing[i]),
+            std::forward_as_tuple(std::move(fetched[i]))).first;
+        if (ret->second.coin.IsSpent()) {
+            ret->second.flags = CCoinsCacheEntry::FRESH;
+        }
+        cachedCoinsUsage += ret->second.coin.DynamicMemoryUsage();
+        ++cold;
+    }
+    return cold;
 }
 
 bool CCoinsViewCache::HaveCoin(const COutPoint &outpoint) const {

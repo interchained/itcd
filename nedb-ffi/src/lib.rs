@@ -248,6 +248,79 @@ pub extern "C" fn nedb_free_value(ptr: *mut c_uchar, len: usize) {
     }
 }
 
+/// Batch read: fetch N values by key, in PARALLEL on phase 2 (rayon over the
+/// engine's get — mirrors the parallel put_batch). The read-side twin of
+/// put_batch for the connect-loop coin prefetch: instead of N scattered
+/// single-key NEDB reads interleaved with validation, the chainstate can warm a
+/// whole batch of coins in one call.
+///
+/// Inputs reuse the `NedbOp` array — only `key`/`key_len` are read; `value`/
+/// `value_len` are ignored. The caller pre-allocates two output arrays of length
+/// `ops_len`: on return `values_out[i]` is a freshly-allocated buffer (free with
+/// nedb_free_value) or null when the key is absent, and `value_lens_out[i]` is
+/// its length (0 when absent). Returns 0 on success, -1 on a null-argument error.
+#[no_mangle]
+pub extern "C" fn nedb_get_batch(
+    handle: *mut NedbHandle,
+    ops: *const NedbOp, ops_len: usize,
+    values_out: *mut *mut c_uchar,
+    value_lens_out: *mut usize,
+) -> c_int {
+    if handle.is_null() || ops.is_null() || values_out.is_null() || value_lens_out.is_null() {
+        return -1;
+    }
+    if ops_len == 0 { return 0; }
+    let ops_slice = unsafe { std::slice::from_raw_parts(ops, ops_len) };
+
+    // Materialize the keys up front (owned) so the parallel read has Sync data.
+    let keys: Vec<Option<Vec<u8>>> = ops_slice.iter().map(|op| {
+        if op.key.is_null() { None }
+        else { Some(unsafe { std::slice::from_raw_parts(op.key, op.key_len) }.to_vec()) }
+    }).collect();
+
+    let results: Vec<Option<Vec<u8>>> = {
+        #[cfg(feature = "phase2")]
+        {
+            use rayon::prelude::*;
+            let h = unsafe { &*handle };
+            keys.par_iter().map(|k| {
+                let k = k.as_ref()?;
+                let key_hex = hex::encode(k);
+                let node = h.db.get(&h.coll, &key_hex)?;
+                let val_str = node.data["v"].as_str()?;
+                hex::decode(val_str).ok()
+            }).collect()
+        }
+        #[cfg(not(feature = "phase2"))]
+        {
+            let inner = unsafe { &*handle }.inner.lock().unwrap();
+            keys.iter().map(|k| {
+                let k = k.as_ref()?;
+                inner.store.get(k).cloned()
+            }).collect()
+        }
+    };
+
+    // Hand each buffer back to C (forget the box; caller frees with nedb_free_value).
+    for (i, r) in results.into_iter().enumerate() {
+        match r {
+            Some(bytes) => {
+                let mut boxed: Box<[u8]> = bytes.into_boxed_slice();
+                unsafe {
+                    *value_lens_out.add(i) = boxed.len();
+                    *values_out.add(i)     = boxed.as_mut_ptr();
+                }
+                std::mem::forget(boxed);
+            }
+            None => unsafe {
+                *value_lens_out.add(i) = 0;
+                *values_out.add(i)     = std::ptr::null_mut();
+            },
+        }
+    }
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn nedb_put(
     handle: *mut NedbHandle,

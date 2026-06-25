@@ -64,6 +64,22 @@ bool CCoinsViewDB::HaveCoin(const COutPoint &outpoint) const {
     return m_db->Exists(CoinEntry(&outpoint));
 }
 
+void CCoinsViewDB::BatchGetCoins(const std::vector<COutPoint>& outpoints,
+                                 std::vector<Coin>& coins,
+                                 std::vector<bool>& found) const {
+    // Serialize one CoinEntry key per outpoint, then hand them to the NEDB
+    // backend as a single parallel batch read. CoinEntry only holds a pointer
+    // into `outpoints`, which outlives this call. The result for entry i is the
+    // exact bytes GetCoin(outpoints[i]) would have read — same CoinEntry key,
+    // same Coin deserialization — so this is a drop-in batched GetCoin().
+    std::vector<CoinEntry> entries;
+    entries.reserve(outpoints.size());
+    for (const COutPoint& op : outpoints) {
+        entries.emplace_back(&op);
+    }
+    m_db->BatchRead(entries, found, coins);
+}
+
 uint256 CCoinsViewDB::GetBestBlock() const {
     uint256 hashBestChain;
     if (!m_db->Read(DB_BEST_BLOCK, hashBestChain))

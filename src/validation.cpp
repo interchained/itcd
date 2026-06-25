@@ -1986,6 +1986,8 @@ static int64_t nTimeIndex = 0;
 static int64_t nTimeCallbacks = 0;
 static int64_t nTimeTotal = 0;
 static int64_t nBlocksTotal = 0;
+//! Running total of coins cold-read by the -coinprefetch input batcher (cs_main).
+static int64_t nCoinsPrefetched = 0;
 
 /** Apply the effects of this block (with given index) on the UTXO set represented by coins.
  *  Validity checks that depend on the UTXO set are also done; ConnectBlock()
@@ -2736,6 +2738,35 @@ bool CChainState::ConnectTip(BlockValidationState& state, const CChainParams& ch
     int64_t nTime2 = GetTimeMicros(); nTimeReadFromDisk += nTime2 - nTime1;
     int64_t nTime3;
     LogPrint(BCLog::BENCH, "  - Load block from disk: %.2fms [%.2fs]\n", (nTime2 - nTime1) * MILLI, nTimeReadFromDisk * MICRO);
+
+    // ── Input-coin prefetch (NEDB batch read) ──────────────────────────────
+    // Before validating this block, pull every output it spends into the
+    // chainstate cache with ONE parallel NEDB batch read, instead of letting
+    // ConnectBlock fault them in one-by-one (each a separate cold NEDB lookup)
+    // as it walks the inputs in series — the dominant cost when syncing block
+    // by block. PrefetchCoins() only inserts the same clean cache entries an
+    // on-demand fetch would, so the connected state is byte-identical: this
+    // changes sync speed, never consensus. The block was already read above, so
+    // there is no extra disk read. Gated to initial block download (steady-state
+    // single-block connects gain nothing) and off by default (-coinprefetch),
+    // as this path is consensus-adjacent.
+    static const bool fCoinPrefetch = gArgs.GetBoolArg("-coinprefetch", DEFAULT_COIN_PREFETCH);
+    if (fCoinPrefetch && IsInitialBlockDownload()) {
+        std::vector<COutPoint> prefetch;
+        prefetch.reserve(blockConnecting.vtx.size());
+        for (const auto& ptx : blockConnecting.vtx) {
+            if (ptx->IsCoinBase()) continue;
+            for (const CTxIn& txin : ptx->vin) {
+                prefetch.push_back(txin.prevout);
+            }
+        }
+        if (!prefetch.empty()) {
+            size_t cold = CoinsTip().PrefetchCoins(prefetch);
+            nCoinsPrefetched += (int64_t)cold;
+            LogPrint(BCLog::BENCH, "  - Prefetch inputs: %u requested, %u cold-read [%lld total]\n",
+                     (unsigned)prefetch.size(), (unsigned)cold, (long long)nCoinsPrefetched);
+        }
+    }
     {
         CCoinsViewCache view(&CoinsTip());
         bool rv = ConnectBlock(blockConnecting, state, pindexNew, view, chainparams);

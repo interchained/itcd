@@ -297,6 +297,64 @@ public:
         return true;
     }
 
+    /**
+     * Batch point-read: fetch many keys in a single FFI call. On the NEDB
+     * backend the keys are read in PARALLEL (rayon) — the read-side twin of
+     * WriteBatch(). For each i in [0, keys.size()): found_out[i] is set true and
+     * values_out[i] holds the deserialized value iff keys[i] is present;
+     * otherwise found_out[i] is false and values_out[i] is left default.
+     *
+     * This is a non-throwing optimization primitive: a whole-batch failure or a
+     * per-entry deserialization error is reported as "not found", so the caller
+     * can safely fall back to a normal Read() for the missing keys. It must
+     * never produce a different result than N individual Read() calls would.
+     */
+    template <typename K, typename V>
+    void BatchRead(const std::vector<K>& keys,
+                   std::vector<bool>& found_out,
+                   std::vector<V>& values_out) const
+    {
+        const size_t n = keys.size();
+        found_out.assign(n, false);
+        values_out.resize(n);
+        if (n == 0) return;
+
+        // Serialize every key; keep the byte buffers alive across the FFI call.
+        std::vector<std::vector<unsigned char>> key_bufs(n);
+        std::vector<NedbOp> ops(n);
+        for (size_t i = 0; i < n; ++i) {
+            CDataStream ssKey(SER_DISK, CLIENT_VERSION);
+            ssKey.reserve(DBWRAPPER_PREALLOC_KEY_SIZE);
+            ssKey << keys[i];
+            key_bufs[i] = std::vector<unsigned char>(ssKey.begin(), ssKey.end());
+            ops[i].key       = key_bufs[i].data();
+            ops[i].key_len   = key_bufs[i].size();
+            ops[i].value     = nullptr;
+            ops[i].value_len = 0;
+        }
+
+        std::vector<unsigned char*> vptrs(n, nullptr);
+        std::vector<size_t>         vlens(n, 0);
+        if (nedb_get_batch(pdb, ops.data(), n, vptrs.data(), vlens.data()) != 0) {
+            return; // whole-batch failure: leave everything not-found
+        }
+
+        for (size_t i = 0; i < n; ++i) {
+            if (vptrs[i] == nullptr) continue; // key absent
+            try {
+                CDataStream ssValue(reinterpret_cast<char*>(vptrs[i]),
+                                    reinterpret_cast<char*>(vptrs[i]) + vlens[i],
+                                    SER_DISK, CLIENT_VERSION);
+                ssValue.Xor(obfuscate_key); // no-op (zero key)
+                ssValue >> values_out[i];
+                found_out[i] = true;
+            } catch (const std::exception&) {
+                found_out[i] = false; // treat as miss; caller re-reads via Read()
+            }
+            nedb_free_value(vptrs[i], vlens[i]);
+        }
+    }
+
     template <typename K, typename V>
     bool Write(const K& key, const V& value, bool fSync = false)
     {

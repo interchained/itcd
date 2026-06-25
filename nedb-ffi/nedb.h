@@ -81,6 +81,24 @@ int nedb_get(NedbHandle          *handle,
 void nedb_free_value(unsigned char *ptr, size_t len);
 
 /**
+ * Batch point-read: fetch @ops_len values by key, in PARALLEL on Phase 2
+ * (rayon over the engine's get — the read-side twin of nedb_batch_write).
+ *
+ * Inputs reuse the NedbOp array: only `key` / `key_len` are read; `value` /
+ * `value_len` are ignored. The caller pre-allocates two output arrays of
+ * length @ops_len. On return, for each i:
+ *   values_out[i]     — a freshly heap-allocated value buffer (free via
+ *                       nedb_free_value()), or NULL when the key is absent.
+ *   value_lens_out[i] — its byte length, or 0 when the key is absent.
+ *
+ * Returns 0 on success, -1 on a null-argument error.
+ */
+int nedb_get_batch(NedbHandle      *handle,
+                   const NedbOp    *ops,            size_t  ops_len,
+                   unsigned char  **values_out,
+                   size_t          *value_lens_out);
+
+/**
  * Write @value under @key.
  * In Phase 2 this is a causal PUT with caused_by = previous seq for this key,
  * advancing the BLAKE2b chain head and incrementing the monotonic sequence.

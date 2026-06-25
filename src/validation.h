@@ -91,6 +91,10 @@ static const bool DEFAULT_PERSIST_MEMPOOL = true;
 static const bool DEFAULT_FEEFILTER = true;
 /** Default for -stopatheight */
 static const int DEFAULT_STOPATHEIGHT = 0;
+/** Default for -coinprefetch: batch-prefetch a block's input coins from NEDB
+ *  before connecting it. Off by default — this is a consensus-adjacent sync
+ *  optimization, opt-in until it has soaked on the seeds. */
+static const bool DEFAULT_COIN_PREFETCH = false;
 /** Block files containing a block-height within MIN_BLOCKS_TO_KEEP of ::ChainActive().Tip() will not be pruned. */
 static const unsigned int MIN_BLOCKS_TO_KEEP = 288;
 static const signed int DEFAULT_CHECKBLOCKS = 6;

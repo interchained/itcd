@@ -189,6 +189,17 @@ public:
     //! Just check whether a given outpoint is unspent.
     virtual bool HaveCoin(const COutPoint &outpoint) const;
 
+    //! Batch-fetch coins for many outpoints at once. For each i in
+    //! [0, outpoints.size()): found[i] is set true and coins[i] holds the
+    //! result iff GetCoin(outpoints[i]) would have succeeded; otherwise
+    //! found[i] is false. The default implementation simply loops GetCoin();
+    //! database-backed views override it with a single parallel batch read.
+    //! Used to warm a cache ahead of a serial connect pass, so it must return
+    //! exactly what the equivalent GetCoin() calls would, and never throw.
+    virtual void BatchGetCoins(const std::vector<COutPoint>& outpoints,
+                               std::vector<Coin>& coins,
+                               std::vector<bool>& found) const;
+
     //! Retrieve the block hash whose state this CCoinsView currently represents
     virtual uint256 GetBestBlock() const;
 
@@ -223,6 +234,9 @@ public:
     CCoinsViewBacked(CCoinsView *viewIn);
     bool GetCoin(const COutPoint &outpoint, Coin &coin) const override;
     bool HaveCoin(const COutPoint &outpoint) const override;
+    void BatchGetCoins(const std::vector<COutPoint>& outpoints,
+                       std::vector<Coin>& coins,
+                       std::vector<bool>& found) const override;
     uint256 GetBestBlock() const override;
     std::vector<uint256> GetHeadBlocks() const override;
     void SetBackend(CCoinsView &viewIn);
@@ -282,6 +296,17 @@ public:
      * calls to this cache.
      */
     const Coin& AccessCoin(const COutPoint &output) const;
+
+    /**
+     * Warm the cache with the coins for the given outpoints using a single
+     * batched read from the backing view. Outpoints already resident in this
+     * cache are skipped — their (possibly dirty) state is authoritative, exactly
+     * as in FetchCoin()'s first lookup. Each inserted entry is byte-identical to
+     * what FetchCoin() would have created on demand, so this changes performance
+     * only, never consensus. Returns the number of coins actually cold-read from
+     * the base view.
+     */
+    size_t PrefetchCoins(const std::vector<COutPoint>& outpoints) const;
 
     /**
      * Add a coin. Set possible_overwrite to true if an unspent version may

@@ -58,6 +58,9 @@ public:
 
     bool GetCoin(const COutPoint &outpoint, Coin &coin) const override;
     bool HaveCoin(const COutPoint &outpoint) const override;
+    void BatchGetCoins(const std::vector<COutPoint>& outpoints,
+                       std::vector<Coin>& coins,
+                       std::vector<bool>& found) const override;
     uint256 GetBestBlock() const override;
     std::vector<uint256> GetHeadBlocks() const override;
     bool BatchWrite(CCoinsMap &mapCoins, const uint256 &hashBlock) override;
