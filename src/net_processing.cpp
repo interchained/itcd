@@ -1827,7 +1827,7 @@ void PeerManager::ProcessHeadersMessage(CNode& pfrom, const std::vector<CBlockHe
     //
     // Runs only while warm boot is active and unverified; ignored on full scans.
     if (g_warm_boot_active.load() && !g_warm_boot_verified.load() &&
-        !g_warm_boot_tip_hash.IsNull())
+        !g_warm_boot_anchor.load() && !g_warm_boot_tip_hash.IsNull())
     {
         bool seam_closed = (headers[0].hashPrevBlock == g_warm_boot_tip_hash);
         if (!seam_closed) {

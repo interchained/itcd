@@ -769,7 +769,7 @@ static void ThreadImport(ChainstateManager& chainman, std::vector<fs::path> vImp
         // raw block data has not arrived from peers yet. Calling ActivateBestChain
         // would cause ReadBlockFromDisk to fail fatally.  Skip the startup scan —
         // the IBD loop handles activation as block data arrives from peers.
-        if (g_warm_boot_active && !g_warm_boot_verified) {
+        if (g_warm_boot_active && !g_warm_boot_verified && !g_warm_boot_anchor) {
             LogPrintf("Warm boot active: skipping startup ActivateBestChain scan — awaiting NEDB Proof-of-Prefix seam verification from the seed anchor.\n");
             // Do NOT clear g_warm_boot_active here. It must stay active so the
             // NEDB on-demand ancestor loader keeps serving GetAncestor from the
@@ -1729,15 +1729,16 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                         // Proof-of-Prefix seam (and self-connections are dropped),
                         // so trust the local NEDB tip directly. g_warm_boot_active
                         // stays true so the on-demand ancestor loader keeps serving
-                        // GetAncestor during ActivateBestChain; verified=true both
-                        // releases the startup ABC gate (below) and stops the
-                        // watchdog from demoting a perfectly good tip. Integrity is
-                        // still enforced by content-addressed reads + the warm-boot
-                        // window + -verifynedb. Self-declaring -anchor only trusts
-                        // THIS node's own tip; the network's anchor stays the
-                        // hard-coded seed, so it adds no network attack surface.
+                        // GetAncestor during ActivateBestChain; the dedicated
+                        // g_warm_boot_anchor flag releases the startup ABC gate
+                        // (below) and stops the watchdog from demoting a good tip,
+                        // while g_warm_boot_verified stays strictly seam-confirmed.
+                        // Integrity is still enforced by content-addressed reads +
+                        // the warm-boot window + -verifynedb. Self-declaring -anchor
+                        // only trusts THIS node's own tip; the network's anchor stays
+                        // the hard-coded seed, so it adds no network attack surface.
                         if (gArgs.GetBoolArg("-anchor", false)) {
-                            g_warm_boot_verified.store(true);
+                            g_warm_boot_anchor.store(true);
                             LogPrintf("Anchor mode (-anchor): root-of-trust node — trusting the local NEDB tip without an external Proof-of-Prefix seam.\n");
                         }
                     } else {
@@ -2206,7 +2207,7 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
     // height 0 instead of warm boot. If the seam verified first, this is a no-op.
     if (g_warm_boot_active.load()) {
         node.scheduler->scheduleFromNow([]{
-            if (g_warm_boot_active.load() && !g_warm_boot_verified.load()) {
+            if (g_warm_boot_active.load() && !g_warm_boot_verified.load() && !g_warm_boot_anchor.load()) {
                 LogPrintf("WarmBoot WATCHDOG: NEDB Proof-of-Prefix NOT confirmed within deadline — the seed anchor never extended our tip %s @ %d. Marking for a full resync from height 0 on next start.\n",
                           g_warm_boot_tip_hash.GetHex().substr(0, 16),
                           g_warm_boot_tip_height);

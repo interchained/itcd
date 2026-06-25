@@ -152,6 +152,16 @@ extern std::atomic_bool fReindex;
  *                          on-demand ancestor loader and the seam check live.
  * g_warm_boot_mismatch   — set true if the canonical chain provably disagrees
  *                          with our tip (reserved for active fork detection).
+ * g_warm_boot_anchor     — set true by -anchor: this node is a declared root of
+ *                          trust (a seed/anchor). It has no external peer above
+ *                          its tip to close the seam, so it trusts the local tip
+ *                          directly. The three warm-boot wait-guards (startup
+ *                          ActivateBestChain, the watchdog, and the seam check)
+ *                          treat `anchor` like a confirmed tip — EXCEPT it
+ *                          deliberately leaves g_warm_boot_active true, so the
+ *                          on-demand ancestor loader stays live. Distinct from
+ *                          g_warm_boot_verified, which means strictly "an external
+ *                          peer confirmed our tip via the seam."
  */
 extern uint256           g_warm_boot_tip_hash;
 extern uint256           g_warm_boot_base_hash;
@@ -159,6 +169,7 @@ extern int               g_warm_boot_tip_height;
 extern std::atomic<bool> g_warm_boot_verified;
 extern std::atomic<bool> g_warm_boot_active;
 extern std::atomic<bool> g_warm_boot_mismatch;
+extern std::atomic<bool> g_warm_boot_anchor;
 /** Whether there are dedicated script-checking threads running.
  * False indicates all script checking is done on the main threadMessageHandler thread.
  */

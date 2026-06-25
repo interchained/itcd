@@ -146,6 +146,7 @@ uint256           g_warm_boot_base_hash;        // oldest header in the loaded w
 int               g_warm_boot_tip_height{0};    // height of the warm-boot tip
 std::atomic<bool> g_warm_boot_verified{false}; // set when the canonical-chain seam closes
 std::atomic<bool> g_warm_boot_mismatch{false}; // set if the canonical chain provably disagrees with our tip
+std::atomic<bool> g_warm_boot_anchor{false};   // set by -anchor: this node is a root of trust (no external seam)
 bool fHavePruned = false;
 bool fPruneMode = false;
 bool fRequireStandard = true;
