@@ -34,7 +34,7 @@ use {
     serde_json::json,
     std::path::Path,
     std::sync::Arc,
-    std::sync::atomic::{AtomicBool, Ordering},
+    std::sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -75,6 +75,19 @@ pub struct NedbHandle {
     path:   std::path::PathBuf,                   // database root directory for direct file access
     stop:   Arc<AtomicBool>,                      // signals the flush ticker to exit
     ticker: Option<std::thread::JoinHandle<()>>,  // FFI-managed flush thread, joined on close
+    // When false, writes skip the per-key read-before-write that derives
+    // caused_by (provenance). Set via nedb_set_provenance() for lookup-table
+    // databases whose causal lineage is already intrinsic to the payload — e.g.
+    // the block index, where every CDiskBlockIndex carries hashPrev. The engine
+    // still tracks each entry's `prev` from the in-memory id_index (free) and
+    // get() resolves the current value via that index, so latest-write-wins is
+    // unchanged; we only drop the FFI's redundant full-object disk load that
+    // existed solely to copy a hash into caused_by. NOTE: never disable this for
+    // the chainstate — its caused_by IS the consensus UTXO causal history.
+    provenance:   AtomicBool,
+    // Diagnostics: number of provenance reads avoided (writes issued while
+    // provenance was disabled). Surfaced via nedb_reads_sliced().
+    reads_sliced: AtomicU64,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -165,6 +178,8 @@ pub extern "C" fn nedb_open(path: *const c_char, _dek: *const c_char) -> *mut Ne
         Box::into_raw(Box::new(NedbHandle {
             db: db_arc, coll, path: db_path.to_path_buf(),
             stop, ticker: Some(ticker),
+            provenance:   AtomicBool::new(true),  // on by default; opt-out per DB
+            reads_sliced: AtomicU64::new(0),
         }))
     }
 }
@@ -192,6 +207,51 @@ pub extern "C" fn nedb_close(handle: *mut NedbHandle) {
     }
 
     drop(boxed);
+}
+
+/// Enable (1) or disable (0) causal provenance for writes on this database.
+///
+/// Default is enabled. Disable it ONLY for lookup-table databases whose causal
+/// lineage is already intrinsic to the stored payload — the block index is the
+/// canonical case: every CDiskBlockIndex carries hashPrev, so the block→parent
+/// edge lives in the data and NEDB's per-entry caused_by (which merely chains an
+/// entry to its own previous version) is redundant bookkeeping nobody consumes.
+///
+/// With provenance off, a write skips the read-before-write that loads the prior
+/// object from disk just to copy its hash into caused_by. The engine still sets
+/// each node's `prev` from the in-memory id_index (free) and get() resolves the
+/// current value through that index, so latest-write-wins is unchanged. Only the
+/// caused_by DAG edges (TRACE) are omitted for this DB.
+///
+/// NEVER disable this for the chainstate: there caused_by IS the consensus UTXO
+/// causal history. Block index and chainstate are separate NEDB databases.
+#[no_mangle]
+pub extern "C" fn nedb_set_provenance(handle: *mut NedbHandle, enabled: c_int) {
+    if handle.is_null() { return; }
+    #[cfg(feature = "phase2")]
+    {
+        unsafe { &*handle }.provenance.store(enabled != 0, Ordering::Relaxed);
+    }
+    #[cfg(not(feature = "phase2"))]
+    {
+        let _ = enabled; // Phase 1 (in-process map) has no causal provenance.
+    }
+}
+
+/// Number of provenance reads avoided so far (writes issued with provenance off).
+/// Diagnostic only — lets the node log how much read-before-write work the block
+/// index flush skipped. Returns 0 in Phase 1.
+#[no_mangle]
+pub extern "C" fn nedb_reads_sliced(handle: *mut NedbHandle) -> u64 {
+    if handle.is_null() { return 0; }
+    #[cfg(feature = "phase2")]
+    {
+        unsafe { &*handle }.reads_sliced.load(Ordering::Relaxed)
+    }
+    #[cfg(not(feature = "phase2"))]
+    {
+        0
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -346,10 +406,18 @@ pub extern "C" fn nedb_put(
         let val_bytes = unsafe { std::slice::from_raw_parts(value, value_len) };
         let key_id  = hex::encode(key_bytes);
         let val_hex = hex::encode(val_bytes);
-        let caused_by = h.db.get(&h.coll, &key_id)
-            .filter(|n| !n.hash.is_empty())
-            .map(|n| vec![n.hash.clone()])
-            .unwrap_or_default();
+        // Provenance read-before-write — skipped when this DB opted out (see
+        // nedb_set_provenance). The engine still derives `prev` from the in-memory
+        // id_index, so the version chain and get() are unaffected.
+        let caused_by = if h.provenance.load(Ordering::Relaxed) {
+            h.db.get(&h.coll, &key_id)
+                .filter(|n| !n.hash.is_empty())
+                .map(|n| vec![n.hash.clone()])
+                .unwrap_or_default()
+        } else {
+            h.reads_sliced.fetch_add(1, Ordering::Relaxed);
+            Vec::new()
+        };
         let data = json!({ "v": val_hex });
         match h.db.put(&h.coll, &key_id, data, caused_by, None, None) {
             Ok(_)  => 0,
@@ -492,14 +560,30 @@ pub extern "C" fn nedb_batch_write(handle: *mut NedbHandle, ops: *const NedbOp, 
         // NEDB-backed chain. The read-before-write that establishes provenance
         // is what used to run serially (≈700 ops/s → 40s+ UTXO flushes); here it
         // fans out across every core. Provenance is fully retained.
+        // Provenance read-before-write. For DBs that opted out via
+        // nedb_set_provenance (e.g. the block index, whose causal lineage is
+        // already in the payload via hashPrev), skip the per-entry db.get() —
+        // each one is a full content-addressed object load from disk (no read
+        // cache) solely to copy a hash into caused_by, and it dominates the
+        // block-index flush. The engine still sets node.prev from the in-memory
+        // id_index, so get()/latest-write-wins is unchanged; only the caused_by
+        // DAG edges are omitted for this (non-consensus) database.
+        let provenance = h.provenance.load(Ordering::Relaxed);
         let put_ops: Vec<(String, String, serde_json::Value, Vec<String>, Option<String>, Option<String>)> =
             puts_raw.par_iter().map(|(kid, val)| {
-                let caused_by = db.get(coll, kid)
-                    .filter(|n| !n.hash.is_empty())
-                    .map(|n| vec![n.hash.clone()])
-                    .unwrap_or_default();
+                let caused_by = if provenance {
+                    db.get(coll, kid)
+                        .filter(|n| !n.hash.is_empty())
+                        .map(|n| vec![n.hash.clone()])
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 (coll.to_string(), kid.clone(), json!({ "v": hex::encode(val) }), caused_by, None, None)
             }).collect();
+        if !provenance {
+            h.reads_sliced.fetch_add(puts_raw.len() as u64, Ordering::Relaxed);
+        }
 
         // Deletes (spent coins) — tombstones. Parallelised too. Keys here are now
         // guaranteed disjoint from the puts above (the batch was collapsed to net

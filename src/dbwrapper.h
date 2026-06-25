@@ -258,9 +258,15 @@ public:
      * @param fMemory    If true, use an in-memory store (no persistence).
      * @param fWipe      If true, wipe existing data before opening.
      * @param obfuscate  Ignored — NEDB uses AES-256-GCM, not XOR obfuscation.
+     * @param provenance If false, open the NEDB store with causal provenance
+     *                   disabled (skips the per-write read-before-write that
+     *                   derives caused_by). Use for lookup-table DBs whose
+     *                   lineage is intrinsic to the payload — the block index.
+     *                   MUST stay true for the chainstate (consensus history).
      */
     CDBWrapper(const fs::path& path, size_t nCacheSize,
-               bool fMemory = false, bool fWipe = false, bool obfuscate = false);
+               bool fMemory = false, bool fWipe = false, bool obfuscate = false,
+               bool provenance = true);
     ~CDBWrapper();
 
     CDBWrapper(const CDBWrapper&)            = delete;

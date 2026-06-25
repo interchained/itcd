@@ -59,6 +59,28 @@ NedbHandle *nedb_open(const char *path, const char *dek);
 /** Close the database and free all resources.  Safe to call with NULL. */
 void nedb_close(NedbHandle *handle);
 
+/**
+ * Enable (1) or disable (0) causal provenance for writes on @handle.
+ *
+ * Default: enabled. Disable ONLY for lookup-table databases whose causal lineage
+ * is already intrinsic to the payload — the block index is the canonical case
+ * (every CDiskBlockIndex carries hashPrev, so the block→parent edge is in the
+ * data). With provenance off, writes skip the read-before-write that loads the
+ * prior object from disk just to copy its hash into caused_by; the engine still
+ * tracks each entry's prev from the in-memory id-index, so get()/latest-write-
+ * wins is unchanged. Only the caused_by DAG edges are omitted for this DB.
+ *
+ * NEVER disable for the chainstate — there caused_by IS the consensus UTXO
+ * causal history. (Block index and chainstate are separate NEDB databases.)
+ */
+void nedb_set_provenance(NedbHandle *handle, int enabled);
+
+/**
+ * Number of provenance reads avoided so far on @handle (diagnostic).
+ * Returns 0 in Phase 1.
+ */
+uint64_t nedb_reads_sliced(NedbHandle *handle);
+
 /* ---- Single-record operations --------------------------------------- */
 
 /**

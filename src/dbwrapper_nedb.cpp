@@ -59,7 +59,7 @@ const unsigned int CDBWrapper::OBFUSCATE_KEY_NUM_BYTES = 8;
 // ---------------------------------------------------------------------------
 
 CDBWrapper::CDBWrapper(const fs::path& path, size_t nCacheSize,
-                       bool fMemory, bool fWipe, bool obfuscate)
+                       bool fMemory, bool fWipe, bool obfuscate, bool provenance)
     : pdb(nullptr)
 {
     m_name = path.string();
@@ -105,6 +105,16 @@ CDBWrapper::CDBWrapper(const fs::path& path, size_t nCacheSize,
     pdb = nedb_open(m_name.c_str(), dek);
     if (!pdb) {
         throw dbwrapper_error("NEDB: failed to open database: " + m_name);
+    }
+
+    // Lookup-table DBs (the block index) carry their causal lineage in the
+    // payload itself (CDiskBlockIndex.hashPrev), so NEDB's per-write caused_by
+    // is redundant. Opening them no-provenance skips the read-before-write that
+    // dominated the block-index flush. The chainstate always keeps provenance.
+    if (!provenance) {
+        nedb_set_provenance(pdb, 0);
+        LogPrintf("NEDB: '%s' opened with causal provenance DISABLED "
+                  "(lookup-table fast path; lineage is intrinsic to payload)\n", m_name);
     }
 
     LogPrintf("NEDB: opened database '%s'\n", m_name);

@@ -161,7 +161,12 @@ size_t CCoinsViewDB::EstimateSize() const
     return m_db->EstimateSize(DB_COIN, (char)(DB_COIN+1));
 }
 
-CBlockTreeDB::CBlockTreeDB(size_t nCacheSize, bool fMemory, bool fWipe) : CDBWrapper(GetDataDir() / "blocks" / "index", nCacheSize, fMemory, fWipe) {
+// provenance=false: the block index is a lookup table whose causal lineage is
+// already intrinsic to each entry (CDiskBlockIndex.hashPrev). Skipping NEDB's
+// per-write read-before-write here removes the disk-read storm that dominated
+// the "write block index to disk" flush stage. The chainstate (CCoinsViewDB)
+// keeps provenance — its caused_by is the consensus UTXO causal history.
+CBlockTreeDB::CBlockTreeDB(size_t nCacheSize, bool fMemory, bool fWipe) : CDBWrapper(GetDataDir() / "blocks" / "index", nCacheSize, fMemory, fWipe, /*obfuscate=*/false, /*provenance=*/false) {
 }
 
 bool CBlockTreeDB::ReadBlockFileInfo(int nFile, CBlockFileInfo &info) {
@@ -343,7 +348,13 @@ bool CBlockTreeDB::WriteBatchSync(const std::vector<std::pair<int, const CBlockF
         batch.Write(DB_CHAIN_WORK_TIP, ArithToUint256(pBestInBatch->nChainWork));
     }
 
-    return WriteBatch(batch, true);
+    bool ok = WriteBatch(batch, true);
+    // Diagnostics: how many per-entry provenance disk-reads this no-provenance
+    // block-index DB has avoided (the read-before-write that used to dominate
+    // the "write block index to disk" flush stage). Visible under -debug=bench.
+    LogPrint(BCLog::BENCH, "NEDB block index: %llu provenance reads sliced (cumulative)\n",
+             (unsigned long long)nedb_reads_sliced(GetHandle()));
+    return ok;
 }
 
 bool CBlockTreeDB::WriteFlag(const std::string &name, bool fValue) {
