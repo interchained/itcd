@@ -113,6 +113,16 @@ CDBWrapper::CDBWrapper(const fs::path& path, size_t nCacheSize,
         LogPrintf("NEDB: v3 segment/pack object store ENABLED for '%s' (-dagv3)\n", m_name);
     }
 
+    // Fast-fsync opt-in (-dagfastsync): use a plain fsync(2) at v3 durability
+    // points instead of the OS full barrier (F_FULLFSYNC on macOS). MUST run
+    // before nedb_open(). Much faster flush on macOS (Fusion/SATA); no-op
+    // off-macOS. Weaker only against power-loss-to-platter — still crash-safe,
+    // and the chainstate re-syncs from peers. Pairs with -dagv3.
+    if (gArgs.GetBoolArg("-dagfastsync", false)) {
+        nedb_set_fast_fsync(1);
+        LogPrintf("NEDB: fast-fsync ENABLED for '%s' (-dagfastsync; plain fsync(2) vs F_FULLFSYNC)\n", m_name);
+    }
+
     pdb = nedb_open(m_name.c_str(), dek);
     if (!pdb) {
         throw dbwrapper_error("NEDB: failed to open database: " + m_name);

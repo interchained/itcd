@@ -30,10 +30,10 @@ hex    = "0.4"
 blake2 = { version = "0.10", optional = true }  # Phase 1 head chain + Phase 2 write-dedup value fingerprint
 
 # Phase 2: real NEDB DAG engine (activated by default).
-# Pinned to the v2.3.33 release tag — the first engine that ships the v3
-# segment/pack object store (gated by NEDB_DAG_V3, default off) plus durable
-# flush-on-close. nedb_set_dag_v3() flips that switch; without a v3-capable
-# engine the switch is a silent no-op, so this pin is load-bearing for --dagv3.
+# Pinned to the v2.3.3333 release tag — ships the v3 segment/pack object store
+# (gated by NEDB_DAG_V3, default off), durable flush-on-close, AND the macOS
+# fast-fsync path (gated by NEDB_FAST_FSYNC). nedb_set_dag_v3() / nedb_set_fast_
+# fsync() flip those switches; this pin is load-bearing for -dagv3 / -dagfastsync.
 nedb-engine  = { git = "https://github.com/Eth-Interchained/nedb", package = "nedb-engine", tag = "v2.3.3333", optional = true }
 serde_json   = { version = "1", optional = true }
 rayon        = { version = "1", optional = true }  # parallel scan for startup

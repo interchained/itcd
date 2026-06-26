@@ -76,6 +76,20 @@ void nedb_close(NedbHandle *handle);
 void nedb_set_dag_v3(int enabled);
 
 /**
+ * Enable (1) or disable (0) fast fsync for the NEDB v3 segment store. Must be
+ * called BEFORE nedb_open(): the engine reads the process-global NEDB_FAST_FSYNC
+ * switch when it constructs the segment store. The node calls it once at startup
+ * via the -dagfastsync arg.
+ *
+ * When on, the engine uses a plain fsync(2) at v3 durability points instead of
+ * the OS full barrier (F_FULLFSYNC on macOS) — much faster flush on macOS
+ * (Fusion/SATA), still crash-safe, at the cost of power-loss-to-platter
+ * durability. Requires the v3 store (-dagv3); no-op on Linux/Windows (their
+ * default sync is already a plain fsync). Default: off.
+ */
+void nedb_set_fast_fsync(int enabled);
+
+/**
  * Enable (1) or disable (0) causal provenance for writes on @handle.
  *
  * Default: enabled. Disable ONLY for lookup-table databases whose causal lineage

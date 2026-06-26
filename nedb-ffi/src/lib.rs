@@ -260,6 +260,33 @@ pub extern "C" fn nedb_set_dag_v3(enabled: c_int) {
     }
 }
 
+/// Enable (1) or disable (0) fast fsync for the NEDB v3 segment store. **Must be
+/// called BEFORE nedb_open()** — the engine reads the process-global
+/// `NEDB_FAST_FSYNC` switch when it constructs the segment store. The ITC node
+/// calls this once at startup via the `-dagfastsync` arg.
+///
+/// When on, the engine uses a plain `fsync(2)` at v3 durability points instead of
+/// the OS full barrier (`F_FULLFSYNC` on macOS) — much faster flush on macOS
+/// (Fusion/SATA), still crash-safe, at the cost of power-loss-to-platter
+/// durability (the chainstate is reconstructible from peers). Requires the v3
+/// store (`-dagv3`); a no-op on Linux/Windows, where the default sync is already
+/// a plain fsync. Default: off.
+#[no_mangle]
+pub extern "C" fn nedb_set_fast_fsync(enabled: c_int) {
+    #[cfg(feature = "phase2")]
+    {
+        if enabled != 0 {
+            std::env::set_var("NEDB_FAST_FSYNC", "1");
+        } else {
+            std::env::remove_var("NEDB_FAST_FSYNC");
+        }
+    }
+    #[cfg(not(feature = "phase2"))]
+    {
+        let _ = enabled; // Phase 1 (in-process map) has no on-disk fsync.
+    }
+}
+
 /// Enable (1) or disable (0) causal provenance for writes on this database.
 ///
 /// Default is enabled. Disable it ONLY for lookup-table databases whose causal
