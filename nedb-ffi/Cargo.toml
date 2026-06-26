@@ -34,7 +34,7 @@ blake2 = { version = "0.10", optional = true }  # Phase 1 head chain + Phase 2 w
 # segment/pack object store (gated by NEDB_DAG_V3, default off) plus durable
 # flush-on-close. nedb_set_dag_v3() flips that switch; without a v3-capable
 # engine the switch is a silent no-op, so this pin is load-bearing for --dagv3.
-nedb-engine  = { git = "https://github.com/Eth-Interchained/nedb", package = "nedb-engine", tag = "v2.3.33", optional = true }
+nedb-engine  = { git = "https://github.com/Eth-Interchained/nedb", package = "nedb-engine", tag = "v2.3.3333", optional = true }
 serde_json   = { version = "1", optional = true }
 rayon        = { version = "1", optional = true }  # parallel scan for startup
 
