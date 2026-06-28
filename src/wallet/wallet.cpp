@@ -9,6 +9,7 @@
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
 #include <fs.h>
+#include <ghost.h>
 #include <interfaces/chain.h>
 #include <interfaces/wallet.h>
 #include <key.h>
@@ -4100,7 +4101,29 @@ std::shared_ptr<CWallet> CWallet::Create(interfaces::Chain& chain, const std::st
         walletInstance->m_last_block_processed_height = -1;
     }
 
-    if (tip_height && *tip_height != rescan_height)
+    if (tip_height && *tip_height != rescan_height && GhostReadiness::Get().Restricted())
+    {
+        // ── Ghost Protocol — defer the boot-time wallet rescan ───────────────────
+        // Under a restricted ghost boot the block index is only PARTIALLY hydrated.
+        // A boot-time rescan walks height-by-height from rescan_height to the tip
+        // (ScanForWalletTransactions -> chain.getBlockHash(h) -> the chain interface),
+        // which reaches raw, not-yet-hydrated index entries the access seam does not
+        // cover at these call sites — the exact partial-index crash class ghost
+        // exists to prevent (this is where the boot-time rescan segfaults).
+        //
+        // The UTXO model is LOCKED: wallet UTXO is a per-wallet spendability cache,
+        // NOT consensus state, so deferring it is safe. We do NOT advance the
+        // wallet's PERSISTED sync point here (no chainStateFlushed / locator write),
+        // so the unscanned gap (rescan_height..tip) is reconciled by a later rescan —
+        // once the node reaches full readiness (background hydrate complete) or via an
+        // explicit -rescan. (Runtime note for validation: m_last_block_processed was
+        // set to the tip above for live new-block processing; the persisted locator is
+        // intentionally left behind so funds in the gap are picked up by that later
+        // rescan rather than silently skipped.)
+        walletInstance->WalletLogPrintf("[GHOST] deferring boot-time rescan of %i block(s) from height %i: index only partially hydrated under restricted ghost mode. Persisted sync point left untouched; gap will be rescanned at full readiness or via -rescan.\n",
+                                        *tip_height - rescan_height, rescan_height);
+    }
+    else if (tip_height && *tip_height != rescan_height)
     {
         // We can't rescan beyond non-pruned blocks, stop and throw an error.
         // This might happen if a user uses an old wallet within a pruned node
