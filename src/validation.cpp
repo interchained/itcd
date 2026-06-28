@@ -18,6 +18,7 @@
 #include <consensus/validation.h>
 #include <cuckoocache.h>
 #include <flatfile.h>
+#include <ghost.h>
 #include <hash.h>
 #include <index/txindex.h>
 #include <logging.h>
@@ -4440,7 +4441,14 @@ bool WarmBootLoadParent(CBlockIndex* pindex)
     // GetAncestor() reaches an unlinked stub and probes the demand-loader. Return
     // quietly — logging here floods the startup log (hundreds of lines) for no
     // reason. Genuine warm-boot errors below still log.
-    if (!g_warm_boot_active) return false;
+    //
+    // Ghost Protocol: this demand loader IS the OnDemandHydrate engine for a
+    // restricted ghost boot. Fire it whenever warm boot OR ghost-restricted mode
+    // is active, so GetAncestor can synchronously pull a needed parent from NEDB
+    // while the background hydrate is still catching up. Behavior-neutral when
+    // ghost is off; dormant during a synchronous ghost hydrate (the full index is
+    // already linked, so GetAncestor never reaches a stub here).
+    if (!g_warm_boot_active && !GhostReadiness::Get().Restricted()) return false;
     if (!pblocktree)          { LogPrintf("WarmBootLoadParent: pblocktree is null\n");  return false; }
     if (!pindex)              { LogPrintf("WarmBootLoadParent: pindex is null\n");       return false; }
     if (!pindex->phashBlock)  { LogPrintf("WarmBootLoadParent: phashBlock is null\n");  return false; }
@@ -4701,6 +4709,94 @@ bool CChainState::TryWarmBoot(CBlockTreeDB& blocktree,
               (unsigned)m_blockman.m_block_index.size(),
               g_warm_boot_base_hash.GetHex().substr(0, 12), base_height,
               tip_hash.GetHex().substr(0, 12), ptip->nHeight,
+              tip_chainwork.GetHex().substr(0, 16));
+
+    // ── Load block-file metadata (nLastBlockFile + vinfoBlockFile) ───────────────
+    // The full hydrate gets this from LoadBlockIndexDB(); the instant window boot
+    // MUST load it too. Without it, vinfoBlockFile is empty and nLastBlockFile is 0,
+    // so the FIRST FlushBlockFile() — triggered by ANY flush: a wallet rebroadcast
+    // at postInitProcess, or the first inbound block's FlushStateToDisk — indexes
+    // vinfoBlockFile[0] on an empty vector and segfaults (the crash seen on Nemo:
+    // FlushBlockFile <- FlushStateToDisk <- AcceptToMemoryPool <- ReacceptWalletTxs).
+    // This is the exact read LoadBlockIndexDB() performs; it just never ran on the
+    // warm-boot path. Init-time + cs_main held, single-threaded, no flush in flight.
+    nLastBlockFile = 0;
+    blocktree.ReadLastBlockFile(nLastBlockFile);
+    vinfoBlockFile.clear();
+    vinfoBlockFile.resize(nLastBlockFile + 1);
+    for (int nFile = 0; nFile <= nLastBlockFile; nFile++) {
+        blocktree.ReadBlockFileInfo(nFile, vinfoBlockFile[nFile]);
+    }
+    for (int nFile = nLastBlockFile + 1; true; nFile++) {
+        CBlockFileInfo info;
+        if (blocktree.ReadBlockFileInfo(nFile, info)) {
+            vinfoBlockFile.push_back(info);
+        } else {
+            break;
+        }
+    }
+    LogPrintf("TryWarmBoot: loaded block-file metadata — last block file = %d, %u record(s). Flush path is now safe.\n",
+              nLastBlockFile, (unsigned)vinfoBlockFile.size());
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// warpSpeed: arm the Proof-of-Prefix seam over an already fully-hydrated index.
+// ─────────────────────────────────────────────────────────────────────────────
+// Warm Boot stays the correctness model; warpSpeed is the latency architecture.
+// LoadBlockIndex has already loaded the COMPLETE block index (every pprev linked,
+// every pskip built) in one sequential nedb_scan pass, so CBlockIndex::GetAncestor
+// resolves via skip pointers and never reaches a null pprev — the on-demand loader
+// (WarmBootLoadParent) can never fire, and the tip->genesis crawl is impossible.
+// This routine does NOT load anything; it only re-establishes the seam/watchdog
+// bookkeeping that confirms our persisted tip is canonical against a peer.
+bool CChainState::ArmWarmBootSeam(CBlockTreeDB& blocktree,
+                                  const Consensus::Params& params,
+                                  int64_t hydrate_ms)
+{
+    AssertLockHeld(cs_main);
+
+    // Fresh Proof-of-Prefix state for this boot.
+    g_warm_boot_verified.store(false);
+    g_warm_boot_mismatch.store(false);
+
+    uint256       tip_hash;
+    arith_uint256 tip_chainwork;
+    if (!blocktree.ReadTipHash(tip_hash) ||
+        !blocktree.ReadTipChainWork(tip_chainwork) ||
+        tip_hash.IsNull())
+    {
+        LogPrintf("warpSpeed: full header hydrate in %lld ms — no persisted tip; normal start, Proof-of-Prefix seam idle.\n",
+                  (long long)hydrate_ms);
+        return false;
+    }
+
+    BlockMap& idx = m_blockman.m_block_index;
+    auto it = idx.find(tip_hash);
+    CBlockIndex* ptip = (it != idx.end()) ? it->second : nullptr;
+
+    // The persisted tip must be a resume point whose block data is on disk. A
+    // header-only tip (e.g. one written by an older build) is not seam-able —
+    // let standard most-work consensus drive canonicity instead of asserting.
+    if (!ptip || !(ptip->nStatus & BLOCK_HAVE_DATA)) {
+        LogPrintf("warpSpeed: full header hydrate in %lld ms — persisted tip %s is not a data resume point; seam idle, normal consensus drives canonicity.\n",
+                  (long long)hydrate_ms, tip_hash.GetHex().substr(0, 16));
+        return false;
+    }
+
+    g_warm_boot_tip_hash      = tip_hash;
+    g_warm_boot_tip_height    = ptip->nHeight;
+    g_warm_boot_tip_chainwork = tip_chainwork;
+    // Full hydrate links the whole chain below the tip, so the Proof-of-Prefix
+    // base is genesis itself (not a 2016-window floor).
+    g_warm_boot_base_hash     = params.hashGenesisBlock;
+
+    LogPrintf("warpSpeed: full header hydrate complete in %lld ms — %u index entries, fully linked + skip-pointered; on-demand crawl impossible. Tip %s @ %d, chainwork %s. Proof-of-Prefix seam armed. [hydrate <3s => v1 ships as-is; 30s+ => build v2 background hydrate]\n",
+              (long long)hydrate_ms,
+              (unsigned)idx.size(),
+              tip_hash.GetHex().substr(0, 12),
+              ptip->nHeight,
               tip_chainwork.GetHex().substr(0, 16));
     return true;
 }

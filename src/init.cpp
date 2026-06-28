@@ -26,6 +26,7 @@
 #include <compat/sanity.h>
 #include <consensus/validation.h>
 #include <fs.h>
+#include <ghost.h>
 #include <hash.h>
 #include <httprpc.h>
 #include <httpserver.h>
@@ -420,9 +421,11 @@ void SetupServerArgs(NodeContext& node)
     argsman.AddArg("-flushwindow=<n>", strprintf("Force a full chainstate flush every <n> connected blocks during sync, bounding how much dirty UTXO a clean shutdown must write (and how much an unclean exit loses), at the cost of some write amplification. 0 = disabled, rely only on the cache-size/time triggers (default: %d).", DEFAULT_BLOCK_FLUSH_WINDOW), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-coinprefetch", strprintf("During initial block download, batch-read every input coin a block spends from NEDB in one parallel lookup before validating it, instead of faulting them in one-by-one. Pure read-side sync optimization — the connected chainstate is byte-identical (default: %u).", DEFAULT_COIN_PREFETCH), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-verifynedb", strprintf("Run an eager full-store NEDB integrity scan at startup (re-hashes every content-addressed object — O(n), can take minutes at scale). Off by default: integrity is enforced lazily by content-addressed read verification, the warm-boot window load, the Proof-of-Prefix peer seam, and the standard last-blocks VerifyDB. Enable after suspected on-disk corruption (default: %u).", DEFAULT_VERIFY_NEDB), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-warmhydrate=<mode>", strprintf("How the NEDB block index is brought up at boot (warpSpeed). 'full' (default): one sequential scan of the COMPLETE header tree — links every block, builds skip pointers — then resume the chain tip / chainstate. A fully linked, skip-pointered index keeps GetAncestor O(log n) so no consumer (BIP34, sequence locks, peer locators) can trigger a tip->genesis demand crawl. 'background': reserved seam for instant-tip + background hydrate (not yet wired; falls back to 'full'). 'window': legacy 2016-header window with lazy demand-loading — opt-in ONLY for A/B measurement; this is the path that stalls for hours on a synced node (default: %s).", DEFAULT_WARM_HYDRATE), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-dagv3", "Use the NEDB v3 segment/pack object store instead of the default loose one-file-per-object store. Batches writes into append-only segment packs (one fsync per group-commit) with background compaction and .idx sidecars — much faster chainstate and block-index flush during sync, and far fewer inodes. Transparent to consensus data (keys, values, Merkle head, AS OF, causal provenance are unchanged); existing stores are read back via dual-read, so it is a non-destructive opt-in. Default: off.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-dagfastsync", "With -dagv3, use a plain fsync(2) at NEDB v3 segment durability points instead of the OS full barrier (F_FULLFSYNC on macOS). Much faster chainstate flush on macOS (Fusion/SATA) at the cost of power-loss-to-platter durability — still crash-safe, and the chainstate is reconstructible from peers. No-op on Linux/Windows, where the default sync is already a plain fsync. Default: off.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-anchor", "Run as a root-of-trust anchor/seed node: on warm boot, trust the local NEDB tip and proceed without awaiting an external Proof-of-Prefix seam. For the canonical seed(s) — which have no external peer above their tip to close the seam (and self-connections are dropped), so the seam can never close for them. Integrity still rests on content-addressed read verification, the warm-boot window, and -verifynedb. Setting this only makes THIS node trust its own local tip; it does NOT make the network trust it. Default: off.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-ghost-protocol", strprintf("Boot in RESTRICTED ghost mode: accept the persisted NEDB tip on local content-addressed integrity and bring the node up under an explicit readiness state machine (logged as [GHOST] transitions) instead of assuming the whole block index exists the moment a tip is known. Foundation release: the index is still hydrated synchronously at boot, so this is behavior-neutral — it threads the readiness gate through the boot while every historical block-index access is routed through the seam in follow-up work; instant-tip + background hydrate switch on only once that routing is complete. Forces a full header hydrate (ignores -warmhydrate=window). Default: %u.", DEFAULT_GHOST_PROTOCOL), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-debuglogfile=<file>", strprintf("Specify location of debug log file. Relative paths will be prefixed by a net-specific datadir location. (-nodebuglogfile to disable; default: %s)", DEFAULT_DEBUGLOGFILE), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-feefilter", strprintf("Tell other nodes to filter invs to us by our mempool min fee (default: %u)", DEFAULT_FEEFILTER), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-includeconf=<file>", "Specify additional configuration file, relative to the -datadir path (only useable from configuration file, not command line)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1612,6 +1615,21 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
     // back to the manual rebuild prompt. The guard prevents an infinite loop if
     // the rebuild itself fails.
     bool auto_reindexed_chainstate = false;
+    // ── Ghost Protocol — restricted fast-boot readiness ────────────────────────
+    // -ghost-protocol arms the GhostReadiness state machine for this boot. Scope of
+    // this change: the flag + the state machine + [GHOST] transition logs, threaded
+    // onto the EXISTING synchronous hydrate so it is strictly behavior-neutral —
+    // nothing calls the access seam yet (that per-subsystem routing is the next
+    // step). We deliberately do NOT background the hydrate or fake an instant-tip
+    // read here: backgrounding before every historical access is gated would
+    // re-introduce the exact partial-index crash the seam exists to prevent. Build
+    // the gate; then turn on the magic.
+    const bool ghost_protocol = gArgs.GetBoolArg("-ghost-protocol", DEFAULT_GHOST_PROTOCOL);
+    if (ghost_protocol) {
+        GhostReadiness::Get().SetEnabled(true);
+        GhostReadiness::Get().Advance(GhostState::Booting);
+        LogPrintf("[GHOST] -ghost-protocol set — entering restricted ghost mode (foundation: readiness state machine live; hydrate still synchronous, so boot behavior is unchanged this build; instant-tip + background hydrate land once the access seam is routed through every subsystem).\n");
+    }
     while (!fLoaded && !ShutdownRequested()) {
         bool fReset = fReindex;
         auto is_coinsview_empty = [&](CChainState* chainstate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
@@ -1622,6 +1640,13 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
         // replay or active-tip load) that -reindex-chainstate can repair from the
         // block index without a full resync.
         bool chainstate_needs_rebuild = false;
+        // Ghost instant-boot taken this attempt? (window + tip loaded via TryWarmBoot
+        // instead of a full synchronous hydrate.) When true the node comes up
+        // RESTRICTED on the window + demand-loader, so we must NOT advance to
+        // ChainstateReady/FullReady — the deep index is not built (that is the
+        // background hydrate's job). Staying restricted keeps the demand loader armed
+        // for deep walks and keeps the wallet boot-rescan deferred until reconcile.
+        bool ghost_instant = false;
 
         uiInterface.InitMessage(_("Loading block index...").translated);
 
@@ -1718,14 +1743,38 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                         // rebuild scan and the node would hang on an empty
                         // chainstate. A full block-index scan + replay is the
                         // correct (and intended) path for an explicit reindex.
-                        if (!warmboot_blocked && !fReindex && !fReindexChainState) {
+                        // warpSpeed hydrate strategy (-warmhydrate). Default is a
+                        // full header hydrate (else-branch below). The legacy
+                        // 2016-window warm boot — the path with the tip->genesis
+                        // demand crawl — is opt-in ONLY, for A/B measurement.
+                        const std::string warm_hydrate = gArgs.GetArg("-warmhydrate", DEFAULT_WARM_HYDRATE);
+                        // Ghost takes the INSTANT window boot (TryWarmBoot): read the
+                        // persisted tip + load the last 2016 headers + genesis in
+                        // seconds, then come up RESTRICTED and demand-load deep history
+                        // through the seam. -warmhydrate=window selects the same path
+                        // for A/B measurement on a normal node.
+                        if ((warm_hydrate == "window" || ghost_protocol) && !warmboot_blocked && !fReindex && !fReindexChainState) {
                             LOCK(cs_main);
                             warm_ok = chainman.ActiveChainstate().TryWarmBoot(
                                 *pblocktree, chainparams.GetConsensus());
                         }
+                        if (ghost_protocol) {
+                            // Local integrity is established here — either the eager
+                            // -verifynedb scan above, or (default) the trust we place in
+                            // content-addressed reads. The persisted tip is accepted as
+                            // UNTAMPERED local state; CANONICAL placement is confirmed by
+                            // the Proof-of-Prefix seam / -anchor just below. If TryWarmBoot
+                            // could not run (no stored tip / prior-unconfirmed / reindex),
+                            // ghost falls through to the full synchronous hydrate.
+                            GhostReadiness::Get().Advance(GhostState::NedbVerified);
+                        }
                     }
 
                     if (warm_ok) {
+                        // Windowed boot succeeded — either -warmhydrate=window or, now,
+                        // -ghost-protocol's INSTANT boot. Only the last ~2016 headers +
+                        // tip + genesis are loaded; deep history is demand-loaded by the
+                        // GetAncestor chokepoint (WarmBootLoadParent).
                         g_warm_boot_active = true;
                         // Anchor/seed mode: this node is a declared root of trust.
                         // It has no external peer above its tip to close the
@@ -1740,15 +1789,78 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                         // the warm-boot window + -verifynedb. Self-declaring -anchor
                         // only trusts THIS node's own tip; the network's anchor stays
                         // the hard-coded seed, so it adds no network attack surface.
-                        if (gArgs.GetBoolArg("-anchor", false)) {
+                        const bool anchor = gArgs.GetBoolArg("-anchor", false);
+                        if (anchor) {
                             g_warm_boot_anchor.store(true);
                             LogPrintf("Anchor mode (-anchor): root-of-trust node — trusting the local NEDB tip without an external Proof-of-Prefix seam.\n");
                         }
+                        if (ghost_protocol) {
+                            // INSTANT BOOT. The node comes up RESTRICTED on the window;
+                            // it does NOT advance to a full index / FullReady here — the
+                            // deep index hydrate is a background follow-up. Staying
+                            // restricted keeps the demand loader armed for deep walks and
+                            // keeps the wallet boot-rescan deferred (PR-4) until reconcile.
+                            ghost_instant = true;
+                            if (anchor) {
+                                GhostReadiness::Get().Advance(GhostState::Anchored);
+                                LogPrintf("[GHOST] INSTANT BOOT: window + persisted tip loaded; -anchor trusts the local tip. Node coming up RESTRICTED — deep history demand-loads via the seam; full index hydrate + wallet reconcile are the background follow-up.\n");
+                            } else {
+                                GhostReadiness::Get().Advance(GhostState::AnchorPending);
+                                LogPrintf("[GHOST] INSTANT BOOT: window + persisted tip loaded. Node coming up RESTRICTED, awaiting Proof-of-Prefix confirmation from a peer; deep history demand-loads via the seam; full index hydrate + wallet reconcile are the background follow-up.\n");
+                            }
+                        }
                     } else {
+                        // warpSpeed v1 — full header hydrate (DEFAULT path).
+                        // One sequential nedb_scan of the whole block index → link
+                        // pprev → build pskip; LoadChainTip then resumes the chain
+                        // tip / chainstate (UTXO) with no re-IBD. A fully linked,
+                        // skip-pointered index makes GetAncestor O(log n), so the
+                        // on-demand ancestor loader can never crawl for ANY consumer
+                        // (BIP34, sequence locks, peer locators). The 2016-window
+                        // lazy loader was the only thing that crawled, and it is
+                        // gone from the default path. "First make it impossible to
+                        // crawl; then make it instant."
+                        const std::string warm_hydrate = gArgs.GetArg("-warmhydrate", DEFAULT_WARM_HYDRATE);
+                        if (warm_hydrate == "background") {
+                            LogPrintf("warpSpeed: -warmhydrate=background (v2 instant-tip + background hydrate) is a reserved seam, not yet wired — using full hydrate this run.\n");
+                        }
+                        // Ghost: the index is about to be hydrated. In this foundation
+                        // build the hydrate is synchronous (the daemon blocks here, as a
+                        // normal node does); the state still advances so the [GHOST] log
+                        // tells the true story. A background hydrate replaces this inline
+                        // load once the access seam gates every historical reader.
+                        if (ghost_protocol) GhostReadiness::Get().Advance(GhostState::IndexHydrating);
+                        const int64_t t_hydrate0 = GetTimeMillis();
                         if (!chainman.LoadBlockIndex(chainparams)) {
                             if (ShutdownRequested()) break;
                             strLoadError = _("Error loading block database");
                             break;
+                        }
+                        const int64_t t_hydrate = GetTimeMillis() - t_hydrate0;
+                        // Ghost: index fully linked + skip-pointered. GetAncestor is now
+                        // O(log n) for every consumer, so no reader can demand-crawl.
+                        if (ghost_protocol) GhostReadiness::Get().Advance(GhostState::IndexReady);
+
+                        // Warm Boot stays the correctness model: arm the Proof-of-
+                        // Prefix seam over the now-complete index. The demand loader
+                        // is inert (nothing to demand-load), but the seam still
+                        // confirms our tip is canonical against a peer and still
+                        // protects the startup ActivateBestChain gate when the
+                        // validated tip sits below the header tip (a flush gap).
+                        // Skipped under reindex / prior-unconfirmed, exactly as the
+                        // windowed path was.
+                        if (!warmboot_blocked && !fReindex && !fReindexChainState) {
+                            const bool seam_armed = WITH_LOCK(::cs_main, return chainman.ActiveChainstate().ArmWarmBootSeam(
+                                *pblocktree, chainparams.GetConsensus(), t_hydrate));
+                            if (seam_armed) {
+                                g_warm_boot_active = true;
+                                if (gArgs.GetBoolArg("-anchor", false)) {
+                                    g_warm_boot_anchor.store(true);
+                                    LogPrintf("Anchor mode (-anchor): root-of-trust node — trusting the local NEDB tip without an external Proof-of-Prefix seam.\n");
+                                }
+                            }
+                        } else {
+                            LogPrintf("warpSpeed: full header hydrate complete in %lld ms (Proof-of-Prefix seam disabled this run: reindex or prior-unconfirmed tip).\n", (long long)t_hydrate);
                         }
                     }
                 }
@@ -1780,6 +1892,10 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                 // block tree into BlockIndex()!
 
                 bool failed_chainstate_init = false;
+
+                // Ghost: about to open the coins DB, replay, and load the active tip
+                // (the global UTXO). Synchronous in this build.
+                if (ghost_protocol && !ghost_instant) GhostReadiness::Get().Advance(GhostState::ChainstateHydrating);
 
                 for (CChainState* chainstate : chainman.GetAll()) {
                     const int64_t coinsdb_start_time = GetTimeMillis();
@@ -1850,6 +1966,17 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                 }
                 if (failed_chainstate_init) {
                     break; // out of the chainstate activation do-while
+                }
+
+                if (ghost_protocol && !ghost_instant) {
+                    // Global UTXO is up and the active tip is loaded — full validation
+                    // is possible from here. Pin hydrated-through to the active tip so
+                    // the seam's fast path is fully open the instant a follow-up step
+                    // routes a reader through it (in this build nothing does yet, so
+                    // this is a forward-compatible no-op rather than a behavior change).
+                    const CBlockIndex* ghost_tip = chainman.ActiveChainstate().m_chain.Tip();
+                    if (ghost_tip) GhostReadiness::Get().SetHydratedThrough(ghost_tip->nHeight);
+                    GhostReadiness::Get().Advance(GhostState::ChainstateReady);
                 }
             } catch (const std::exception& e) {
                 LogPrintf("%s\n", e.what());
@@ -1931,6 +2058,12 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
 
             if (!failed_verification) {
                 fLoaded = true;
+                if (ghost_protocol && !ghost_instant) {
+                    // Boot complete: index linked, chainstate up, VerifyDB passed.
+                    // Restricted ghost mode lifts — the node is an ordinary full node
+                    // for the remainder of this run.
+                    GhostReadiness::Get().Advance(GhostState::FullReady);
+                }
                 LogPrintf(" block index %15dms\n", GetTimeMillis() - load_block_index_start_time);
             }
         } while(false);

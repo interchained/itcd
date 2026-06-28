@@ -82,6 +82,19 @@ static const int64_t DEFAULT_BLOCK_FLUSH_WINDOW = 0;
  *  Proof-of-Prefix peer seam, and Core's own VerifyDB over the last blocks. Enable
  *  -verifynedb for an eager full-store re-hash (e.g. after suspected disk corruption). */
 static const bool DEFAULT_VERIFY_NEDB = false;
+/** Default for -warmhydrate: how the NEDB block index is brought up at boot (warpSpeed).
+ *  "full" (default) — v1: ONE sequential nedb_scan of the COMPLETE header tree,
+ *      linking every pprev and building every pskip, then resume the chain tip /
+ *      chainstate (UTXO). A fully linked, skip-pointered index keeps
+ *      CBlockIndex::GetAncestor O(log n), so the on-demand ancestor loader can
+ *      never crawl tip->genesis for ANY consumer (BIP34, sequence locks, peer
+ *      locators, future callers). "First make it impossible to crawl."
+ *  "background" — v2 (reserved seam): resume the tip instantly, hydrate the full
+ *      skip-pointered tree on a background thread. Not yet wired; falls back to "full".
+ *  "window" — legacy: load only the last 2016 headers and demand-load deeper
+ *      ancestors lazily. Opt-in ONLY for A/B measuring the old crawl against the
+ *      full hydrate; this is the path that stalls (hours) on a synced chain. */
+static const char* const DEFAULT_WARM_HYDRATE = "full";
 static const bool DEFAULT_CHECKPOINTS_ENABLED = true;
 static const bool DEFAULT_TXINDEX = false;
 static const char* const DEFAULT_BLOCKFILTERINDEX = "0";
@@ -701,6 +714,21 @@ public:
      * so the caller falls back to LoadBlockIndex.
      */
     bool TryWarmBoot(CBlockTreeDB& blocktree, const Consensus::Params& params)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
+    /**
+     * warpSpeed full hydrate: arm the NEDB Proof-of-Prefix seam over an index that
+     * has ALREADY been fully loaded by LoadBlockIndex (every pprev linked, every
+     * pskip built). Reads the persisted tip + cumulative work and records the seam
+     * tip/height/base. Loads NOTHING — because the index is complete and
+     * skip-pointered, the on-demand ancestor loader is inert (GetAncestor never
+     * reaches a null pprev), so the tip->genesis crawl is impossible. hydrate_ms is
+     * logged loudly so the measured full-hydrate time decides whether the v2
+     * background hydrate is warranted. Returns true if the seam was armed
+     * (g_warm_boot_active should be set); false (seam idle, normal most-work
+     * consensus drives canonicity) when there is no valid persisted data tip.
+     */
+    bool ArmWarmBootSeam(CBlockTreeDB& blocktree, const Consensus::Params& params, int64_t hydrate_ms)
         EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     /**

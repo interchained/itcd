@@ -897,62 +897,38 @@ pub extern "C" fn nedb_scan(
 
     #[cfg(feature = "phase2")]
     {
-        use std::fs;
+        // Enumerate through the ENGINE (dual-read: loose objects AND v3 segment
+        // packs), exactly like nedb_iter_new — NOT a raw loose-object file walk.
+        //
+        // The previous implementation walked indexes/<coll>/id/<shard>/* with
+        // fs::read_dir and read TWO files per entry (the id pointer + the object).
+        // On a v3 segment/pack store that is:
+        //   1. Pathologically slow — one CreateFile per object, single-threaded,
+        //      ~600k+ syscalls, murderous under Windows real-time AV (this is the
+        //      0.1%-CPU "hang" in LoadBlockIndexGuts: it was grinding loose files).
+        //   2. INCORRECT — any object the v3 compactor folded into a segment pack
+        //      has no loose objects/<2>/<rest> file, so fs::read failed and the
+        //      entry was silently skipped (`continue`), yielding an INCOMPLETE
+        //      block index. db.list() goes through the engine, which reads loose
+        //      objects AND segment packs, so every entry is returned.
+        //
+        // db.list() loads the collection's nodes up front (one bulk, segment-aware
+        // read) — a transient memory cost at boot, but correct and orders of
+        // magnitude fewer syscalls than the per-object walk. The C++ callback still
+        // streams: it deserializes each (k, v) and filters non-block-index keys.
         let h = unsafe { &*handle };
-        // Sequential file walk — optimal for rotational disk (HDD/Fusion Drive).
-        // Progress fires immediately per entry: real-time counter on all storage types.
-        let index_root = h.path.join("indexes").join(&h.coll).join("id");
-        // Count entries first (directory stat, no file reads) for progress denominator.
-        // This can still take visible time on huge object stores, so emit
-        // progress callbacks with total=0 during discovery. The C++ callback treats
-        // these as status-only heartbeats and does not deserialize key/value bytes.
-        let mut total: u64 = 0;
-        if let Ok(shards) = fs::read_dir(&index_root) {
-            for shard in shards.flatten() {
-                if shard.path().is_dir() {
-                    if let Ok(files) = fs::read_dir(shard.path()) {
-                        for _ in files {
-                            total += 1;
-                            if total == 1 || total % 10_000 == 0 {
-                                unsafe {
-                                    callback(std::ptr::null(), 0, std::ptr::null(), 0, total, 0, ctx);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let nodes = h.db.list(&h.coll);
+        let total = nodes.len() as u64;
         if total == 0 { return 0; }
-        // Sequential read + immediate callback per entry.
         let mut progress: u64 = 0;
-        if let Ok(shards) = fs::read_dir(&index_root) {
-            for shard in shards.flatten() {
-                if !shard.path().is_dir() { continue; }
-                if let Ok(files) = fs::read_dir(shard.path()) {
-                    for id_file in files.flatten() {
-                        let path = id_file.path();
-                        let hex_key = match path.file_name().and_then(|n| n.to_str()) {
-                            Some(s) => s.to_string(), None => continue,
-                        };
-                        let k = match hex::decode(&hex_key) { Ok(b) => b, Err(_) => continue };
-                        let hash_hex = match fs::read_to_string(&path) { Ok(s) => s, Err(_) => continue };
-                        let hash_hex = hash_hex.trim();
-                        if hash_hex.len() < 4 { continue; }
-                        let obj_path = h.path.join("objects").join(&hash_hex[..2]).join(&hash_hex[2..]);
-                        let obj_bytes = match fs::read(&obj_path) { Ok(b) => b, Err(_) => continue };
-                        let node: serde_json::Value = match serde_json::from_slice(&obj_bytes) {
-                            Ok(v) => v, Err(_) => continue
-                        };
-                        let v = match hex::decode(node["data"]["v"].as_str().unwrap_or("")) {
-                            Ok(b) => b, Err(_) => continue
-                        };
-                        progress += 1;
-                        unsafe {
-                            callback(k.as_ptr(), k.len(), v.as_ptr(), v.len(), progress, total, ctx);
-                        }
-                    }
-                }
+        for n in nodes {
+            let k = match hex::decode(&n.id) { Ok(b) => b, Err(_) => continue };
+            let v = match hex::decode(n.data["v"].as_str().unwrap_or("")) {
+                Ok(b) => b, Err(_) => continue
+            };
+            progress += 1;
+            unsafe {
+                callback(k.as_ptr(), k.len(), v.as_ptr(), v.len(), progress, total, ctx);
             }
         }
         progress
