@@ -33,6 +33,12 @@
 class CBlockIndex;
 class uint256;
 
+//! Default for -ghost-protocol. Off = ordinary node: the readiness state machine
+//! and the access seam below are inert (every seam call is a pure pass-through to
+//! the legacy lookups). On = enter RESTRICTED ghost mode at boot and run the
+//! readiness state machine, logging each [GHOST] transition.
+static constexpr bool DEFAULT_GHOST_PROTOCOL = false;
+
 //! Ghost readiness states. Forward-only (except Failed). A subsystem gates on the
 //! MINIMUM state it needs — never on chainActive.Tip() alone (that is the trap).
 enum class GhostState : int {

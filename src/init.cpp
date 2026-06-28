@@ -26,6 +26,7 @@
 #include <compat/sanity.h>
 #include <consensus/validation.h>
 #include <fs.h>
+#include <ghost.h>
 #include <hash.h>
 #include <httprpc.h>
 #include <httpserver.h>
@@ -424,6 +425,7 @@ void SetupServerArgs(NodeContext& node)
     argsman.AddArg("-dagv3", "Use the NEDB v3 segment/pack object store instead of the default loose one-file-per-object store. Batches writes into append-only segment packs (one fsync per group-commit) with background compaction and .idx sidecars — much faster chainstate and block-index flush during sync, and far fewer inodes. Transparent to consensus data (keys, values, Merkle head, AS OF, causal provenance are unchanged); existing stores are read back via dual-read, so it is a non-destructive opt-in. Default: off.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-dagfastsync", "With -dagv3, use a plain fsync(2) at NEDB v3 segment durability points instead of the OS full barrier (F_FULLFSYNC on macOS). Much faster chainstate flush on macOS (Fusion/SATA) at the cost of power-loss-to-platter durability — still crash-safe, and the chainstate is reconstructible from peers. No-op on Linux/Windows, where the default sync is already a plain fsync. Default: off.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-anchor", "Run as a root-of-trust anchor/seed node: on warm boot, trust the local NEDB tip and proceed without awaiting an external Proof-of-Prefix seam. For the canonical seed(s) — which have no external peer above their tip to close the seam (and self-connections are dropped), so the seam can never close for them. Integrity still rests on content-addressed read verification, the warm-boot window, and -verifynedb. Setting this only makes THIS node trust its own local tip; it does NOT make the network trust it. Default: off.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-ghost-protocol", strprintf("Boot in RESTRICTED ghost mode: accept the persisted NEDB tip on local content-addressed integrity and bring the node up under an explicit readiness state machine (logged as [GHOST] transitions) instead of assuming the whole block index exists the moment a tip is known. Foundation release: the index is still hydrated synchronously at boot, so this is behavior-neutral — it threads the readiness gate through the boot while every historical block-index access is routed through the seam in follow-up work; instant-tip + background hydrate switch on only once that routing is complete. Forces a full header hydrate (ignores -warmhydrate=window). Default: %u.", DEFAULT_GHOST_PROTOCOL), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-debuglogfile=<file>", strprintf("Specify location of debug log file. Relative paths will be prefixed by a net-specific datadir location. (-nodebuglogfile to disable; default: %s)", DEFAULT_DEBUGLOGFILE), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-feefilter", strprintf("Tell other nodes to filter invs to us by our mempool min fee (default: %u)", DEFAULT_FEEFILTER), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-includeconf=<file>", "Specify additional configuration file, relative to the -datadir path (only useable from configuration file, not command line)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -1613,6 +1615,21 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
     // back to the manual rebuild prompt. The guard prevents an infinite loop if
     // the rebuild itself fails.
     bool auto_reindexed_chainstate = false;
+    // ── Ghost Protocol — restricted fast-boot readiness ────────────────────────
+    // -ghost-protocol arms the GhostReadiness state machine for this boot. Scope of
+    // this change: the flag + the state machine + [GHOST] transition logs, threaded
+    // onto the EXISTING synchronous hydrate so it is strictly behavior-neutral —
+    // nothing calls the access seam yet (that per-subsystem routing is the next
+    // step). We deliberately do NOT background the hydrate or fake an instant-tip
+    // read here: backgrounding before every historical access is gated would
+    // re-introduce the exact partial-index crash the seam exists to prevent. Build
+    // the gate; then turn on the magic.
+    const bool ghost_protocol = gArgs.GetBoolArg("-ghost-protocol", DEFAULT_GHOST_PROTOCOL);
+    if (ghost_protocol) {
+        GhostReadiness::Get().SetEnabled(true);
+        GhostReadiness::Get().Advance(GhostState::Booting);
+        LogPrintf("[GHOST] -ghost-protocol set — entering restricted ghost mode (foundation: readiness state machine live; hydrate still synchronous, so boot behavior is unchanged this build; instant-tip + background hydrate land once the access seam is routed through every subsystem).\n");
+    }
     while (!fLoaded && !ShutdownRequested()) {
         bool fReset = fReindex;
         auto is_coinsview_empty = [&](CChainState* chainstate) EXCLUSIVE_LOCKS_REQUIRED(::cs_main) {
@@ -1724,10 +1741,23 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                         // 2016-window warm boot — the path with the tip->genesis
                         // demand crawl — is opt-in ONLY, for A/B measurement.
                         const std::string warm_hydrate = gArgs.GetArg("-warmhydrate", DEFAULT_WARM_HYDRATE);
-                        if (warm_hydrate == "window" && !warmboot_blocked && !fReindex && !fReindexChainState) {
+                        if (warm_hydrate == "window" && !warmboot_blocked && !fReindex && !fReindexChainState && !ghost_protocol) {
                             LOCK(cs_main);
                             warm_ok = chainman.ActiveChainstate().TryWarmBoot(
                                 *pblocktree, chainparams.GetConsensus());
+                        }
+                        if (ghost_protocol) {
+                            // Local integrity is established here — either the eager
+                            // -verifynedb scan above, or (default) the trust we place in
+                            // content-addressed reads. The persisted tip is accepted as
+                            // UNTAMPERED local state, not yet as CANONICAL placement
+                            // (anchor Proof-of-Prefix confirmation is wired in a later
+                            // step). Ghost always takes the full-hydrate path below; the
+                            // windowed loader (the crawl-prone legacy path) is disabled
+                            // above for ghost boots.
+                            if (warm_hydrate == "window")
+                                LogPrintf("[GHOST] -warmhydrate=window ignored under -ghost-protocol — ghost uses the full header hydrate (the window loader is the legacy demand-crawl path).\n");
+                            GhostReadiness::Get().Advance(GhostState::NedbVerified);
                         }
                     }
 
@@ -1766,6 +1796,12 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                         if (warm_hydrate == "background") {
                             LogPrintf("warpSpeed: -warmhydrate=background (v2 instant-tip + background hydrate) is a reserved seam, not yet wired — using full hydrate this run.\n");
                         }
+                        // Ghost: the index is about to be hydrated. In this foundation
+                        // build the hydrate is synchronous (the daemon blocks here, as a
+                        // normal node does); the state still advances so the [GHOST] log
+                        // tells the true story. A background hydrate replaces this inline
+                        // load once the access seam gates every historical reader.
+                        if (ghost_protocol) GhostReadiness::Get().Advance(GhostState::IndexHydrating);
                         const int64_t t_hydrate0 = GetTimeMillis();
                         if (!chainman.LoadBlockIndex(chainparams)) {
                             if (ShutdownRequested()) break;
@@ -1773,6 +1809,9 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                             break;
                         }
                         const int64_t t_hydrate = GetTimeMillis() - t_hydrate0;
+                        // Ghost: index fully linked + skip-pointered. GetAncestor is now
+                        // O(log n) for every consumer, so no reader can demand-crawl.
+                        if (ghost_protocol) GhostReadiness::Get().Advance(GhostState::IndexReady);
 
                         // Warm Boot stays the correctness model: arm the Proof-of-
                         // Prefix seam over the now-complete index. The demand loader
@@ -1825,6 +1864,10 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                 // block tree into BlockIndex()!
 
                 bool failed_chainstate_init = false;
+
+                // Ghost: about to open the coins DB, replay, and load the active tip
+                // (the global UTXO). Synchronous in this build.
+                if (ghost_protocol) GhostReadiness::Get().Advance(GhostState::ChainstateHydrating);
 
                 for (CChainState* chainstate : chainman.GetAll()) {
                     const int64_t coinsdb_start_time = GetTimeMillis();
@@ -1895,6 +1938,17 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
                 }
                 if (failed_chainstate_init) {
                     break; // out of the chainstate activation do-while
+                }
+
+                if (ghost_protocol) {
+                    // Global UTXO is up and the active tip is loaded — full validation
+                    // is possible from here. Pin hydrated-through to the active tip so
+                    // the seam's fast path is fully open the instant a follow-up step
+                    // routes a reader through it (in this build nothing does yet, so
+                    // this is a forward-compatible no-op rather than a behavior change).
+                    const CBlockIndex* ghost_tip = chainman.ActiveChainstate().m_chain.Tip();
+                    if (ghost_tip) GhostReadiness::Get().SetHydratedThrough(ghost_tip->nHeight);
+                    GhostReadiness::Get().Advance(GhostState::ChainstateReady);
                 }
             } catch (const std::exception& e) {
                 LogPrintf("%s\n", e.what());
@@ -1976,6 +2030,12 @@ bool AppInitMain(const util::Ref& context, NodeContext& node, interfaces::BlockA
 
             if (!failed_verification) {
                 fLoaded = true;
+                if (ghost_protocol) {
+                    // Boot complete: index linked, chainstate up, VerifyDB passed.
+                    // Restricted ghost mode lifts — the node is an ordinary full node
+                    // for the remainder of this run.
+                    GhostReadiness::Get().Advance(GhostState::FullReady);
+                }
                 LogPrintf(" block index %15dms\n", GetTimeMillis() - load_block_index_start_time);
             }
         } while(false);
