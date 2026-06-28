@@ -4710,6 +4710,34 @@ bool CChainState::TryWarmBoot(CBlockTreeDB& blocktree,
               g_warm_boot_base_hash.GetHex().substr(0, 12), base_height,
               tip_hash.GetHex().substr(0, 12), ptip->nHeight,
               tip_chainwork.GetHex().substr(0, 16));
+
+    // ── Load block-file metadata (nLastBlockFile + vinfoBlockFile) ───────────────
+    // The full hydrate gets this from LoadBlockIndexDB(); the instant window boot
+    // MUST load it too. Without it, vinfoBlockFile is empty and nLastBlockFile is 0,
+    // so the FIRST FlushBlockFile() — triggered by ANY flush: a wallet rebroadcast
+    // at postInitProcess, or the first inbound block's FlushStateToDisk — indexes
+    // vinfoBlockFile[0] on an empty vector and segfaults (the crash seen on Nemo:
+    // FlushBlockFile <- FlushStateToDisk <- AcceptToMemoryPool <- ReacceptWalletTxs).
+    // This is the exact read LoadBlockIndexDB() performs; it just never ran on the
+    // warm-boot path. Init-time + cs_main held, single-threaded, no flush in flight.
+    nLastBlockFile = 0;
+    blocktree.ReadLastBlockFile(nLastBlockFile);
+    vinfoBlockFile.clear();
+    vinfoBlockFile.resize(nLastBlockFile + 1);
+    for (int nFile = 0; nFile <= nLastBlockFile; nFile++) {
+        blocktree.ReadBlockFileInfo(nFile, vinfoBlockFile[nFile]);
+    }
+    for (int nFile = nLastBlockFile + 1; true; nFile++) {
+        CBlockFileInfo info;
+        if (blocktree.ReadBlockFileInfo(nFile, info)) {
+            vinfoBlockFile.push_back(info);
+        } else {
+            break;
+        }
+    }
+    LogPrintf("TryWarmBoot: loaded block-file metadata — last block file = %d, %u record(s). Flush path is now safe.\n",
+              nLastBlockFile, (unsigned)vinfoBlockFile.size());
+
     return true;
 }
 
