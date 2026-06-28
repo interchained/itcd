@@ -85,9 +85,13 @@ BlockIndexResult RequireBlockIndex(const uint256& hash, GhostAccessPolicy policy
     return BlockIndexResult{nullptr, GhostAccessStatus::NotReady};
 }
 
+// NOTE: for the OnDemandHydrate / BlockUntilReady policies this walks via
+// CBlockIndex::GetAncestor(), which under ghost demand-loads missing parents
+// through WarmBootLoadParent() — that path asserts cs_main. Callers using those
+// policies MUST hold cs_main (exactly as a raw GetAncestor() call requires).
 BlockIndexResult RequireAncestor(const CBlockIndex* start, int height, GhostAccessPolicy policy)
 {
-    if (!start || height < 0) {
+    if (!start || height < 0 || height > start->nHeight) {
         return BlockIndexResult{nullptr, GhostAccessStatus::OutOfRange};
     }
     if (!GhostReadiness::Get().Enabled()) {
@@ -96,12 +100,30 @@ BlockIndexResult RequireAncestor(const CBlockIndex* start, int height, GhostAcce
     }
     // Fast path: target is within the hydrated range -> the normal walk is safe.
     if (GhostReadiness::Get().IsHeightHydrated(height)) {
-        return BlockIndexResult{const_cast<CBlockIndex*>(start->GetAncestor(height)),
-                                GhostAccessStatus::Ok};
+        CBlockIndex* anc = const_cast<CBlockIndex*>(start->GetAncestor(height));
+        return BlockIndexResult{anc, anc ? GhostAccessStatus::Ok : GhostAccessStatus::NotReady};
     }
-    // Deep access below the hydrated window. PR-3+ honors the policy here.
-    (void)policy;
-    return BlockIndexResult{nullptr, GhostAccessStatus::NotReady};
+    // Below the hydrated front: honor the caller's policy.
+    switch (policy) {
+    case GhostAccessPolicy::OnDemandHydrate:
+    case GhostAccessPolicy::BlockUntilReady: {
+        // GetAncestor() walks via the demand-load chokepoint (WarmBootLoadParent),
+        // which synchronously pulls each missing parent from NEDB. Consensus-
+        // critical callers must never proceed on a partial view, so we load the
+        // ancestor now rather than report not-ready. (BlockUntilReady is satisfied
+        // by this synchronous load while the background hydrate front sits below
+        // `height`; a later revision may instead wait on the front to advance.)
+        CBlockIndex* anc = const_cast<CBlockIndex*>(start->GetAncestor(height));
+        return BlockIndexResult{anc, anc ? GhostAccessStatus::Ok : GhostAccessStatus::NotReady};
+    }
+    case GhostAccessPolicy::QueueForLater:
+    case GhostAccessPolicy::ReturnNotReady:
+    case GhostAccessPolicy::FailHard:
+    default:
+        // Non-blocking callers (wallet / RPC / P2P): report not-ready so the caller
+        // can defer the op or answer "syncing", instead of forcing a disk load.
+        return BlockIndexResult{nullptr, GhostAccessStatus::NotReady};
+    }
 }
 
 HydrateResult RequireHydratedThroughHeight(int height, GhostAccessPolicy policy)

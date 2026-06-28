@@ -18,6 +18,7 @@
 #include <consensus/validation.h>
 #include <cuckoocache.h>
 #include <flatfile.h>
+#include <ghost.h>
 #include <hash.h>
 #include <index/txindex.h>
 #include <logging.h>
@@ -4440,7 +4441,14 @@ bool WarmBootLoadParent(CBlockIndex* pindex)
     // GetAncestor() reaches an unlinked stub and probes the demand-loader. Return
     // quietly — logging here floods the startup log (hundreds of lines) for no
     // reason. Genuine warm-boot errors below still log.
-    if (!g_warm_boot_active) return false;
+    //
+    // Ghost Protocol: this demand loader IS the OnDemandHydrate engine for a
+    // restricted ghost boot. Fire it whenever warm boot OR ghost-restricted mode
+    // is active, so GetAncestor can synchronously pull a needed parent from NEDB
+    // while the background hydrate is still catching up. Behavior-neutral when
+    // ghost is off; dormant during a synchronous ghost hydrate (the full index is
+    // already linked, so GetAncestor never reaches a stub here).
+    if (!g_warm_boot_active && !GhostReadiness::Get().Restricted()) return false;
     if (!pblocktree)          { LogPrintf("WarmBootLoadParent: pblocktree is null\n");  return false; }
     if (!pindex)              { LogPrintf("WarmBootLoadParent: pindex is null\n");       return false; }
     if (!pindex->phashBlock)  { LogPrintf("WarmBootLoadParent: phashBlock is null\n");  return false; }
