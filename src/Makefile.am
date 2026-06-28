@@ -157,6 +157,7 @@ BITCOIN_CORE_H = \
   dbwrapper.h \
   flatfile.h \
   fs.h \
+  ghost.h \
   httprpc.h \
   httpserver.h \
   index/base.h \
@@ -314,6 +315,7 @@ libinterchained_server_a_SOURCES = \
   consensus/tx_verify.cpp \
   dbwrapper_nedb.cpp \
   flatfile.cpp \
+  ghost.cpp \
   httprpc.cpp \
   httpserver.cpp \
   index/base.cpp \
